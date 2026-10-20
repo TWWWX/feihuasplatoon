@@ -22,3 +22,6 @@ dist-ssr
 *.njsproj
 *.sln
 *.sw?
+
+# 残留的旧子文件夹（内容已平移到根目录，仅剩无法移动的 .vscode）
+feihua-game/
