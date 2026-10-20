@@ -1,0 +1,34 @@
+/* 基础样式：沿用原单页版「飞花斯普拉遁」配色 */
+:root {
+  --ink-a: #c2352a; /* 赤方墨色 */
+  --ink-b: #1f79c4; /* 青方墨色 */
+  --bg: #f4f6fa;
+  --card: #ffffff;
+  --text: #1f2937;
+  --muted: #5b6b84;
+  --line: #dce3ee;
+  --blank: #edf1f7;
+  --blank-text: #33415c;
+  --grid: #9fabbc;
+  --danger: #98271d;
+  --hit-hold: #6b7688; /* 诗句里命中的己方字（点状线） */
+  --pv-a: #dba2a1; /* 赤方预览 · 叠在未填色格上 */
+  --pv-b: #96badd; /* 青方预览 · 叠在未填色格上 */
+  --pv-ab: #63577c; /* 赤方预览 · 叠在青方格上（抢夺） */
+  --pv-ba: #7d4d66; /* 青方预览 · 叠在赤方格上（抢夺） */
+  --radius: 14px;
+  --shadow: 0 1px 2px rgba(23, 43, 77, 0.06), 0 8px 24px rgba(23, 43, 77, 0.06);
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--text);
+  font-family: 'PingFang SC', 'Microsoft YaHei', 'Source Han Sans SC', 'Noto Sans SC', system-ui, sans-serif;
+  font-size: 16px;
+  line-height: 1.5;
+}
