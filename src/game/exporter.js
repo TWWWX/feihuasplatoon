@@ -247,7 +247,7 @@ function drawShotPanel(ctx, g, x, y, w, h, G) {
 
   /* 统计 */
   let ty = sy + sh + 26
-  [[nm(g, 'A') + '出手', flyCount(g, 'A') + ' 句'], [nm(g, 'B') + '出手', flyCount(g, 'B') + ' 句'], ['双方抢夺合计', capTotal(g) + ' 格']]
+  ;[[nm(g, 'A') + '出手', flyCount(g, 'A') + ' 句'], [nm(g, 'B') + '出手', flyCount(g, 'B') + ' 句'], ['双方抢夺合计', capTotal(g) + ' 格']]
     .forEach((r) => {
       ctx.fillStyle = G.muted; ctx.font = '400 13.5px ' + SHOT_FONT
       ctx.fillText(r[0], x + pad, ty)
@@ -393,7 +393,7 @@ function step(name, fn) {
   try {
     return fn()
   } catch (e) {
-    throw new Error('[' + name + '] ' + ((e && e.message) || e))
+    throw new Error('[' + name + '] ' + ((e && e.message) || e), { cause: e })
   }
 }
 
