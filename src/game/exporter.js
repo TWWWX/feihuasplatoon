@@ -347,7 +347,7 @@ function drawShotRecords(ctx, g, x, y, m, G) {
 }
 
 function buildShotCanvas(g) {
-  const m = shotMetrics(g)
+  const m = step('shotMetrics', () => shotMetrics(g))
   const cv = document.createElement('canvas')
   /* 2 倍分辨率；但 iOS Safari 画布总面积上限约 16.7M px²（4096×4096），
      超限时 getContext('2d') 直接返回 null —— 按面积自适应降倍率兜底 */
@@ -377,15 +377,24 @@ function buildShotCanvas(g) {
     (g.endless ? '战至最后一刻' : '共 ' + g.totalRounds + ' 轮 ｜ 双方各出手 ' + g.totalRounds + ' 次') +
     ' ｜ 已记录 ' + m.recs.length + ' 手', m.PAD, m.PAD + 58)
 
-  drawShotBoard(ctx, g, m.PAD, m.boardTop, m, G)
-  drawShotPanel(ctx, g, m.PAD + m.BW + 24, m.boardTop, m.W - m.PAD * 2 - m.BW - 24, m.BW, G)
+  step('drawShotBoard', () => drawShotBoard(ctx, g, m.PAD, m.boardTop, m, G))
+  step('drawShotPanel', () => drawShotPanel(ctx, g, m.PAD + m.BW + 24, m.boardTop, m.W - m.PAD * 2 - m.BW - 24, m.BW, G))
 
   const recTop = m.boardTop + m.BW + m.gap
   ctx.fillStyle = G.text; ctx.font = '700 15px ' + SHOT_FONT
   ctx.fillText('飞花记录', m.PAD, recTop + 16)
-  drawShotRecords(ctx, g, m.PAD, recTop + 30, m, G)
+  step('drawShotRecords', () => drawShotRecords(ctx, g, m.PAD, recTop + 30, m, G))
 
   return cv
+}
+
+/* 带阶段标记的绘制调用：任何一步抛错，错误信息前缀即阶段名（用于线上定位） */
+function step(name, fn) {
+  try {
+    fn()
+  } catch (e) {
+    throw new Error('[' + name + '] ' + ((e && e.message) || e))
+  }
 }
 
 export function exportShotPng(g, flash) {
