@@ -325,7 +325,7 @@ async function joinRoom() {
 const TEAM_NAME = { A: '赤营', B: '青营' }
 const TEAM_MARK = { A: '赤', B: '青' }
 /* 建议回合数：大致把棋盘涂到 4~5 成（10×10 → 20 轮、8×8 → 15 轮） */
-const SUGGEST_ROUNDS = { 5: 8, 6: 10, 7: 12, 8: 15, 9: 17, 10: 20, 11: 23, 12: 26, 13: 29, 14: 33, 15: 37, 16: 41, 17: 45 }
+const SUGGEST_ROUNDS = { 5: 8, 6: 10, 7: 12, 8: 15, 9: 17, 10: 20, 11: 23, 12: 26, 13: 29, 14: 33, 15: 37, 16: 41, 17: 45, 18: 49, 19: 53, 20: 57 }
 const suggestRounds = (side) => SUGGEST_ROUNDS[side] || Math.max(8, Math.round((side * side) / 5))
 
 /* ================= 全局游戏状态 ================= */
@@ -518,7 +518,7 @@ function onCellClick(idx) {
   flashTip(`修正：${gameState.board[idx].ch} → ${next ? TEAM_NAME[next] : '无主'}`, 'ok')
 }
 
-/* 字号随格子实际宽度走：5×5 不至于小字淹没，17×17 不至于挤成一团 */
+/* 字号随格子实际宽度走：5×5 不至于小字淹没，20×20 不至于挤成一团 */
 const boardEl = ref(null)
 const cellFs = ref(27)
 const boardStyle = computed(() => ({
@@ -790,7 +790,7 @@ function readRounds() {
 function clampSizeInput() {
   let n = parseInt(sizeInput.value, 10)
   if (!isFinite(n)) n = gameState.side
-  n = Math.max(5, Math.min(17, n))
+  n = Math.max(5, Math.min(20, n))
   sizeInput.value = n
   return n
 }
@@ -1002,8 +1002,8 @@ onMounted(() => window.addEventListener('resize', sizeCellFont))
             <input type="checkbox" v-model="fixMode" :disabled="!isHost" /> 修正模式
           </label>
           <label class="sizefield" :class="{ off: gameState.phase === 'playing' }"
-                 title="棋盘 N×N（5–17，上限受 300 字基础字库限制；改完自动重抽棋盘）">
-            <input type="number" v-model.number="sizeInput" min="5" max="17" step="1" inputmode="numeric"
+                 title="棋盘 N×N（5–20，上限受 600 字基础字库限制；改完自动重抽棋盘）">
+            <input type="number" v-model.number="sizeInput" min="5" max="20" step="1" inputmode="numeric"
                    :disabled="gameState.phase === 'playing' || !isHost" @change="onSizeChange" />
             <span>× <b>{{ gameState.side }}</b> 格</span>
           </label>
@@ -1111,7 +1111,7 @@ onMounted(() => window.addEventListener('resize', sizeCellFont))
             <summary>规则与判定逻辑</summary>
             <div class="detbody">
               <ol class="rules">
-                <li>棋盘：从《全唐诗》字频前 300 中<b>随机抽 N×N 个不重复的字</b>铺成方阵（N 可在顶栏设 5–17）。顶栏「<b>额外字</b>」可指定其中 K 格改从<b>额外字池</b>里抽 —— 抽取<b>按唐诗出现频次加权</b>，越常见的字越容易被抽中。</li>
+                <li>棋盘：从基础字库（《全唐诗》字频前 300 + 《全宋词》高频前 300，共 600 字）中<b>随机抽 N×N 个不重复的字</b>铺成方阵（N 可在顶栏设 5–20）。顶栏「<b>额外字</b>」可指定其中 K 格改从<b>额外字池</b>里抽 —— 抽取<b>按唐诗出现频次加权</b>，越常见的字越容易被抽中。</li>
                 <li>涂色：某人飞出一句后，<b>诗句中所有出现在棋盘上的字</b>，对应格子全部涂成该方颜色。</li>
                 <li>合法性：本句命中棋盘的字中，<b>至少要有 1 个格子当前未填色</b>；命中已涂色格可以抢夺。若命中格全都是已有颜色，本句无效。</li>
                 <li>胜负：满设定轮数（双方各飞相同句数）后结算，<b>己方颜色格子多者胜</b>；等同则平局。<b>棋盘提前被填满时立即结算</b>；选「<b>战至最后一刻</b>」时不限轮数，只有棋盘填满或点「提前结算」才结算。</li>

@@ -46,7 +46,7 @@
             ".validate": "newData.isNumber() && newData.val() >= 0 && newData.val() < 2147483648"
           },
           "side": {
-            ".validate": "newData.isNumber() && newData.val() >= 5 && newData.val() <= 17"
+            ".validate": "newData.isNumber() && newData.val() >= 5 && newData.val() <= 20"
           },
           "totalRounds": {
             ".validate": "newData.isNumber() && newData.val() >= 0 && newData.val() <= 999"
