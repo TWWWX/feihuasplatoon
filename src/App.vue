@@ -172,10 +172,11 @@ function startPolling(code) {
       stopPolling()
       return
     }
-    /* 房主心跳：REST 没有 onDisconnect，用时间戳 + 6s 超时判定在线 */
+    /* 房主心跳：REST 没有 onDisconnect，用时间戳 + 6s 超时判定在线。
+       必须用 PUT（RTDB REST 的 PATCH 只接受 {路径:值} 对象，裸数字会 400） */
     if (val.meta && val.meta.hostUid === uid.value) {
       hostOnline.value = true
-      rtdbPatch(`rooms/${code}/presence/host`, Date.now()).catch(() => {})
+      rtdbSet(`rooms/${code}/presence/host`, Date.now()).catch(() => {})
     } else {
       const ts = val.presence && val.presence.host
       hostOnline.value = typeof ts === 'number' && Date.now() - ts < 6000
