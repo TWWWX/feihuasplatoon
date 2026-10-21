@@ -100,7 +100,8 @@ function drawHitMarks(ctx, g, e, text, x, y, px, weight, G) {
   ctx.textAlign = 'left'
   const oy = y + px * 0.22
   const th = Math.max(1.1, px * 0.125)
-  const pen = team === 'A' ? G.inkA : G.inkB
+  const pen = e.team === 'A' ? G.inkA : G.inkB
+  const seen = {}
   for (let i = 0; i < text.length; i++) {
     const ch = text.charAt(i), k = map[ch]
     if (!k || seen[ch]) continue
