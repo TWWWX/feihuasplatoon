@@ -100,9 +100,6 @@
               "raw": {
                 ".validate": "!newData.exists() || (newData.isString() && newData.val().length <= 50)"
               },
-              "meta": {
-                ".validate": "!newData.exists() || (newData.isString() && newData.val().length <= 60)"
-              },
               "hits": {
                 ".validate": "!newData.exists() || (newData.isNumber() && newData.val() >= 0 && newData.val() <= 1000)"
               },

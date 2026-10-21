@@ -418,24 +418,14 @@ function fmtPoem(raw, fallback) {
   return s.replace(/[^\u3400-\u4DBF\u4E00-\u9FA5\u3007A-Za-z0-9]+/g, ' ').trim() || (fallback || '')
 }
 
-/* ================= 诗句词库校验（Cloudflare Worker + D1） ================= */
-const POETRY_API = 'https://feihua-poetry-api.tulin5937.workers.dev/api/poetry' // 本地调试改回 http://127.0.0.1:8787/api/poetry
-let t2s = null /* opencc-js 懒加载：首次提交才加载词典，不拖慢首屏 */
+/* 输入归一化：繁体转简体（棋盘与历史记录都是简体口径）；opencc-js 懒加载，首次提交才加载词典 */
+let t2s = null
 async function toSimplified(s) {
   if (!t2s) {
     const OpenCC = (await import('opencc-js')).default
     t2s = OpenCC.Converter({ from: 't', to: 'cn' })
   }
   return t2s(s)
-}
-/* 词库查询节流：首个请求立即发出，500ms 内的连按/请求中被拦截（不拖慢正常出牌手感） */
-const poetryBusy = ref(false)
-let poetryLastAt = 0
-/* 词库返回 → 「朝代 · 作者《诗名》」，缺项自动省略 */
-function composePoemMeta(d) {
-  const who = [d.dynasty, d.author].filter((x) => x).join(' · ')
-  const t = d.title ? `《${d.title}》` : ''
-  return who ? who + t : t
 }
 
 /* ================= 棋盘 ================= */
@@ -616,11 +606,11 @@ async function submitLine() {
     flashTip('请先输入诗句（仅中文汉字会被识别）。', 'err')
     return
   }
-  if (chars.length > 30) {
-    flashTip('字数过长：词库仅收录 30 字以内的诗句。', 'err')
+  if (chars.length > 50) {
+    flashTip('诗句过长：最多 50 个汉字。', 'err')
     return
   }
-  /* 转简体：棋盘与词库都是简体口径，匹配/查库/查重统一用它 */
+  /* 转简体：棋盘与历史记录都是简体口径，匹配/查重统一用它 */
   const norm = await toSimplified(chars)
   const set = {}
   for (const ch of norm) set[ch] = true
@@ -653,34 +643,6 @@ async function submitLine() {
     }
   }
 
-  /* 词库校验：500ms 节流 + 请求中防重入，连按回车不会瞬间打爆接口 */
-  if (poetryBusy.value) {
-    flashTip('正在校验上一句，请稍候…', 'warn')
-    return
-  }
-  const ts = Date.now()
-  if (ts - poetryLastAt < 500) {
-    flashTip('操作太快，请稍候再按。', 'warn')
-    return
-  }
-  poetryLastAt = ts
-  poetryBusy.value = true
-  let poemMeta = ''
-  try {
-    const res = await fetch(`${POETRY_API}?q=${encodeURIComponent(norm)}`)
-    const data = await res.json()
-    if (!data || data.found !== true) {
-      flashTip('该诗句不在诗库中，请重新输入。', 'err')
-      return
-    }
-    poemMeta = composePoemMeta(data.data || {})
-  } catch (e) {
-    /* 网络故障/词库服务未部署时放行本句（仅提示未校验）；明确的 found:false 仍然拦截 */
-    flashTip('词库服务暂不可用，本句未经校验已放行：' + (e && e.message), 'warn')
-  } finally {
-    poetryBusy.value = false
-  }
-
   /* 记录快照，供撤销 */
   gameState.undoStack.push({
     board: gameState.board.map((c) => ({ ch: c.ch, owner: c.owner })),
@@ -700,7 +662,7 @@ async function submitLine() {
   gameState.log.push({
     type: 'fly', team: me, round: currentRound.value, line: norm, norm,
     hits: hits.length, blank: blanks.length, capture: captures.length, hold: holds.length,
-    raw: (raw || '').trim(), meta: poemMeta, cells: hits.slice(),
+    raw: (raw || '').trim(), cells: hits.slice(),
   })
 
   previewSet.value = new Set()
@@ -1032,7 +994,7 @@ onMounted(() => window.addEventListener('resize', sizeCellFont))
       <h1>飞花斯普拉遁<span class="tag">主持台</span></h1>
       <div class="head-tools">
         <span class="conn" :class="fbStatus" :title="fbError || connText"><i></i>{{ connText }}</span>
-        <span style="color:#98a4b3;font-size:12px;margin-left:6px;font-weight:600">v2.1</span>
+        <span style="color:#98a4b3;font-size:12px;margin-left:6px;font-weight:600">v2.2</span>
         <span v-if="roomState === 'playing'" class="conn room">房间 {{ roomCode }}</span>
         <span v-if="roomState === 'playing'" class="conn room">你是{{ myTeam ? TEAM_NAME[myTeam] : '观战' }}</span>
         <template v-if="roomState === 'playing'">
@@ -1193,8 +1155,8 @@ onMounted(() => window.addEventListener('resize', sizeCellFont))
             </div>
             <div class="row" style="margin-top:12px">
               <button class="primary submit" :class="currentTeam === 'A' ? 'team-a' : 'team-b'"
-                      :disabled="gameState.phase !== 'playing' || !myTurn || hostOffline || poetryBusy" @click="submitLine">
-                {{ poetryBusy ? '校验诗句中…' : myTurn ? '提交飞花（回车）' : '等待对方出牌...' }}
+                      :disabled="gameState.phase !== 'playing' || !myTurn || hostOffline" @click="submitLine">
+                {{ myTurn ? '提交飞花（回车）' : '等待对方出牌...' }}
               </button>
               <button :disabled="gameState.phase !== 'playing' || !myTurn || hostOffline" @click="passTurn">放弃本回合</button>
             </div>
@@ -1228,7 +1190,6 @@ onMounted(() => window.addEventListener('resize', sizeCellFont))
                         <u v-if="seg.kind" class="mk" :class="'mk-' + seg.kind">{{ seg.text }}</u>
                         <template v-else>{{ seg.text }}</template>
                       </template>
-                      <span v-if="e.meta" class="src"> —— {{ e.meta }}</span>
                     </div>
                     <div class="meta">
                       第 {{ e.round }} 轮 · 命中 <b>{{ e.hits }}</b> 格 ｜
@@ -1419,7 +1380,6 @@ textarea.locked::placeholder{color:#6B7889;}
 .mk-hold{text-decoration-style:dotted;text-decoration-color:var(--hit-hold);}
 .loglist .meta{font-size:11.5px;color:var(--muted);margin-top:2px;}
 .loglist .meta em{font-style:normal;font-weight:700;}
-.loglist .line .src{color:#5B6B84;font-size:12px;margin-left:2px;}
 .em-a{color:var(--ink-a);}.em-b{color:var(--ink-b);}
 .empty{font-size:12.5px;color:var(--muted);text-align:center;padding:18px 0;}
 
