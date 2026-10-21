@@ -36,17 +36,17 @@ function saveBlob(blob, name) {
 /* 由棋盘实况统计涂色数（与原版 counts() 一致，不依赖外部分数） */
 function counts(g) {
   let a = 0, b = 0
-  for (const c of g.board) {
+  for (const c of g.board || []) {
     if (c.owner === 'A') a++
     else if (c.owner === 'B') b++
   }
-  return { a, b, n: g.board.length - a - b }
+  return { a, b, n: (g.board || []).length - a - b }
 }
 function flyCount(g, team) {
-  return g.log.filter((e) => e.type === 'fly' && (!team || e.team === team)).length
+  return (g.log || []).filter((e) => e.type === 'fly' && (!team || e.team === team)).length
 }
 function capTotal(g) {
-  return g.log.reduce((s, e) => s + (e.type === 'fly' ? e.capture : 0), 0)
+  return (g.log || []).reduce((s, e) => s + (e.type === 'fly' ? e.capture : 0), 0)
 }
 function lineOf(e) {
   return e.line || e.norm || ''
@@ -91,7 +91,7 @@ function drawSegs(ctx, segs, x, y, px, weight) {
 /* 诗句命中字标记（抢夺＝己方笔色实线／新占＝墨黑实线／己方＝灰色点状线）。
    必须在 fillText 之前调用（先线后字）。 */
 function drawHitMarks(ctx, g, e, text, x, y, px, weight, G) {
-  const map = g.hitKinds(e), team = e.team, seen = {}
+  const map = (g.hitKinds ? g.hitKinds(e) : {}) || {}
   if (!text) return
   let any = false
   for (let i = 0; i < text.length; i++) if (map[text.charAt(i)]) { any = true; break }
@@ -143,7 +143,7 @@ function shotColors() {
 function shotMetrics(g) {
   const W = 1160, PAD = 36
   const BW = 601, CS = 600 / g.side
-  const recs = g.log.filter((e) => e.type === 'fly' || e.type === 'pass')
+  const recs = (g.log || []).filter((e) => e.type === 'fly' || e.type === 'pass')
   /* 记录按「回合」成行：左列赤营、右列青营，一行即一回合 */
   const roundMap = {}, rounds = []
   recs.forEach((e) => {
@@ -392,7 +392,8 @@ export function exportShotPng(g, flash) {
   let cv = null
   try { cv = buildShotCanvas(g) } catch (e) {
     console.error('[export] buildShotCanvas 异常：', e)
-    cv = null
+    flash('✕ 导出失败：' + ((e && e.message) || e) + '（请把这条提示和控制台红字截图反馈）', 'err')
+    return
   }
   if (!cv) {
     flash('✕ 当前环境不支持导出截图（无法创建画布）。', 'err')
