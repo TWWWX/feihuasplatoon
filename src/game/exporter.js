@@ -391,7 +391,7 @@ function buildShotCanvas(g) {
 /* 带阶段标记的绘制调用：任何一步抛错，错误信息前缀即阶段名（用于线上定位） */
 function step(name, fn) {
   try {
-    fn()
+    return fn()
   } catch (e) {
     throw new Error('[' + name + '] ' + ((e && e.message) || e))
   }
