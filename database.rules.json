@@ -17,9 +17,10 @@
         },
         "players": {
           "red": {
-            ".validate": "newData.hasChildren(['uid', 'name'])",
+            ".write": "auth != null && (!data.exists() || data.child('uid').val() === auth.uid)",
+            ".validate": "newData.hasChildren(['uid', 'name']) && newData.child('uid').val() === auth.uid",
             "uid": {
-              ".validate": "newData.isString() && newData.val().length >= 20 && newData.val().length <= 40"
+              ".validate": "newData.isString() && newData.val() === auth.uid"
             },
             "name": {
               ".validate": "newData.isString() && newData.val().length >= 1 && newData.val().length <= 12"

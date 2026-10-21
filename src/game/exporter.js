@@ -1,11 +1,14 @@
 /* ================= 战报截图（PNG）与逐手回放 GIF =================
    从原单页版整体移植：纯 Canvas 手绘、零外部依赖（GIF89a + LZW + 中位切分量化）。
    调用方传入 game 上下文：
-     { side, cells, board, log, phase, totalRounds, endless, round, hitKinds }
+     { side, cells, board, log, phase, totalRounds, endless, round, hitKinds, names }
+   names = { A, B } 为双方自定义阵营名（缺省回退赤营/青营）。
    直接触发浏览器下载（不弹预览层）。 */
 
 const SHOT_FONT = "'Microsoft YaHei','PingFang SC','Source Han Sans SC','Noto Sans SC',system-ui,sans-serif"
 const TEAM_NAME = { A: '赤营', B: '青营' }
+/* 取阵营名：优先用双方改过的名字，没传或为空时回退默认 */
+function nm(g, t) { return (g.names && g.names[t]) || TEAM_NAME[t] }
 
 function p2(n) { return (n < 10 ? '0' : '') + n }
 function stamp() {
@@ -191,7 +194,7 @@ function drawShotPanel(ctx, g, x, y, w, h, G) {
   ctx.fillStyle = G.muted; ctx.font = '700 12.5px ' + SHOT_FONT
   ctx.fillText('涂色面积结算', x + pad, y + 32)
 
-  const rowsDef = [['赤营', c.a, G.inkA, G.inkA], ['青营', c.b, G.inkB, G.inkB], ['未被涂色', c.n, G.muted, G.grid]]
+  const rowsDef = [[nm(g, 'A'), c.a, G.inkA, G.inkA], [nm(g, 'B'), c.b, G.inkB, G.inkB], ['未被涂色', c.n, G.muted, G.grid]]
   let ry = y + 48
   rowsDef.forEach((r, i) => {
     ctx.fillStyle = i === 2 ? G.blank : r[2]
@@ -232,8 +235,8 @@ function drawShotPanel(ctx, g, x, y, w, h, G) {
   const win = c.a > c.b ? 'A' : c.b > c.a ? 'B' : null
   const banner = g.phase === 'ready' ? { t: '尚未开局', f: '#F1F4F9', c: G.muted }
     : g.phase === 'playing' ? { t: '对战进行中 · 第 ' + g.round + (g.endless ? ' 轮 · 战至最后一刻' : ' / ' + g.totalRounds + ' 轮'), f: '#F1F4F9', c: G.muted }
-    : win === 'A' ? { t: '赤营获胜 ｜ ' + c.a + ' : ' + c.b, f: '#FCF0EE', c: G.inkA }
-    : win === 'B' ? { t: '青营获胜 ｜ ' + c.b + ' : ' + c.a, f: '#EDF4FB', c: G.inkB }
+    : win === 'A' ? { t: nm(g, 'A') + '获胜 ｜ ' + c.a + ' : ' + c.b, f: '#FCF0EE', c: G.inkA }
+    : win === 'B' ? { t: nm(g, 'B') + '获胜 ｜ ' + c.b + ' : ' + c.a, f: '#EDF4FB', c: G.inkB }
     : { t: '平局 ｜ ' + c.a + ' : ' + c.b, f: '#F1F4F9', c: G.muted }
   rrPath(ctx, x + pad, sy, bw, sh, 11)
   ctx.fillStyle = banner.f; ctx.fill()
@@ -244,7 +247,7 @@ function drawShotPanel(ctx, g, x, y, w, h, G) {
 
   /* 统计 */
   let ty = sy + sh + 26
-  [['赤营出手', flyCount(g, 'A') + ' 句'], ['青营出手', flyCount(g, 'B') + ' 句'], ['双方抢夺合计', capTotal(g) + ' 格']]
+  [[nm(g, 'A') + '出手', flyCount(g, 'A') + ' 句'], [nm(g, 'B') + '出手', flyCount(g, 'B') + ' 句'], ['双方抢夺合计', capTotal(g) + ' 格']]
     .forEach((r) => {
       ctx.fillStyle = G.muted; ctx.font = '400 13.5px ' + SHOT_FONT
       ctx.fillText(r[0], x + pad, ty)
@@ -260,7 +263,7 @@ function drawShotPanel(ctx, g, x, y, w, h, G) {
   ctx.beginPath(); ctx.moveTo(x + pad, y + 434.5); ctx.lineTo(innerR, y + 434.5); ctx.stroke()
 
   const tileY = y + 450, tileS = 30
-  ;[[G.blank, '未涂色', G.grid], [G.inkA, '赤营格子', G.inkA], [G.inkB, '青营格子', G.inkB]]
+  ;[[G.blank, '未涂色', G.grid], [G.inkA, nm(g, 'A') + '格子', G.inkA], [G.inkB, nm(g, 'B') + '格子', G.inkB]]
     .forEach((t, i) => {
       const tx = x + pad + i * 128
       ctx.fillStyle = t[0]
@@ -317,9 +320,9 @@ function drawShotRecords(ctx, g, x, y, m, G) {
   ctx.fillStyle = G.muted; ctx.font = '700 12px ' + SHOT_FONT
   ctx.fillText('回合', x + 2, y + 17)
   ctx.fillStyle = G.inkA; ctx.font = '700 13.5px ' + SHOT_FONT
-  ctx.fillText('赤营', xA + 2, y + 18)
+  ctx.fillText(nm(g, 'A'), xA + 2, y + 18)
   ctx.fillStyle = G.inkB; ctx.font = '700 13.5px ' + SHOT_FONT
-  ctx.fillText('青营', xB + 2, y + 18)
+  ctx.fillText(nm(g, 'B'), xB + 2, y + 18)
   ctx.strokeStyle = G.line; ctx.lineWidth = 1
   ctx.beginPath(); ctx.moveTo(x, y + 27.5); ctx.lineTo(x + bodyW, y + 27.5); ctx.stroke()
 
@@ -561,17 +564,17 @@ function drawGifChrome(ctx, g, m, snap, i, total, G) {
     ctx.fillText('开局前 · 暂无飞花记录', ip + 18, sy + 26)
   } else if (isEnd) {
     ctx.fillStyle = winColor; ctx.font = '700 14.5px ' + SHOT_FONT
-    ctx.fillText('对战结束 · ' + (c.a > c.b ? '赤营获胜' : c.b > c.a ? '青营获胜' : '平局'), ip + 18, sy + 26)
+    ctx.fillText('对战结束 · ' + (c.a > c.b ? nm(g, 'A') + '获胜' : c.b > c.a ? nm(g, 'B') + '获胜' : '平局'), ip + 18, sy + 26)
   } else {
     ctx.fillStyle = rec.team === 'A' ? G.inkA : G.inkB
     ctx.font = '700 14.5px ' + SHOT_FONT
-    ctx.fillText(TEAM_NAME[rec.team] + ' · 第 ' + rec.round + ' 轮', ip + 18, sy + 26)
+    ctx.fillText(nm(g, rec.team) + ' · 第 ' + rec.round + ' 轮', ip + 18, sy + 26)
   }
 
   /* 比分（右侧，逐段量宽后右对齐） */
   const segs = [
-    ['赤营 ', 13, G.muted], [String(c.a), 20, G.inkA],
-    [' : ', 14, G.muted], [String(c.b), 20, G.inkB], [' 青营', 13, G.muted],
+    [nm(g, 'A') + ' ', 13, G.muted], [String(c.a), 20, G.inkA],
+    [' : ', 14, G.muted], [String(c.b), 20, G.inkB], [' ' + nm(g, 'B'), 13, G.muted],
   ]
   let tw = 0
   segs.forEach((s) => { ctx.font = '800 ' + s[1] + 'px ' + SHOT_FONT; tw += ctx.measureText(s[0]).width })
@@ -591,8 +594,8 @@ function drawGifChrome(ctx, g, m, snap, i, total, G) {
     ctx.fillText(g.side + ' × ' + g.side + ' 共 ' + g.board.length + ' 格，等待双方飞花。', ip, ly)
   } else if (isEnd) {
     drawSegs(ctx, [
-      ['共 ' + total + ' 手 · 赤营 ', G.muted], [String(c.a), G.inkA],
-      [' 格 ／ 青营 ', G.muted], [String(c.b), G.inkB],
+      ['共 ' + total + ' 手 · ' + nm(g, 'A') + ' ', G.muted], [String(c.a), G.inkA],
+      [' 格 ／ ' + nm(g, 'B') + ' ', G.muted], [String(c.b), G.inkB],
       [' 格 ／ 未涂色 ', G.muted], [String(c.n), G.muted], [' 格', G.muted],
     ], ip, ly, 13.5, '400')
   } else if (rec.type === 'pass') {

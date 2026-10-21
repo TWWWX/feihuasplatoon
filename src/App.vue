@@ -77,7 +77,7 @@ function seededShuffle(a, rng) {
   }
   return a
 }
-/* 额外字：按唐诗出现次数加权、不放回地抽 k 个（棋盘上同字只能一格） */
+/* 额外字：按唐诗+宋词合计频次加权、不放回地抽 k 个（棋盘上同字只能一格） */
 function seededPickExtras(k, rng) {
   const idx = []
   const w = []
@@ -271,7 +271,7 @@ async function createRoom() {
     finishReason.value = ''
     await rtdbSet(`rooms/${code}`, {
       meta: { hostUid: uid.value, createdAt: Date.now() },
-      players: { red: { uid: uid.value, name: '房主' } },
+      players: { red: { uid: uid.value, name: '赤营' } },
       state: localToCloudState(),
     })
     lobbyMsg.value = null
@@ -303,7 +303,7 @@ async function joinRoom() {
       /* 直接 PATCH 占青营，不能先读 blue（非成员无读取权限，会被规则拒绝）：
          空位写入成功；已被他人占用时规则拒绝 → 房间已满；蓝位是自己 uid（刷新重连）则放行 */
       try {
-        await rtdbPatch(`rooms/${code}/players/blue`, { uid: uid.value, name: '玩家' })
+        await rtdbPatch(`rooms/${code}/players/blue`, { uid: uid.value, name: '青营' })
       } catch (e) {
         /* 透出 Firebase 原始错误文本，便于区分 Permission denied / Data validation failed */
         console.error('[join] PATCH players/blue 被拒：', e && e.message)
@@ -324,6 +324,30 @@ async function joinRoom() {
 
 /* ================= 常量 ================= */
 const TEAM_NAME = { A: '赤营', B: '青营' }
+/* 阵营名：默认赤营/青营，双方可各自改名；状态条、提示、记录与导出图统一用它 */
+const teamNames = computed(() => ({
+  A: (players.value.red && players.value.red.name) || TEAM_NAME.A,
+  B: (players.value.blue && players.value.blue.name) || TEAM_NAME.B,
+}))
+/* 改阵营名：输入框回显自定义名（默认名留空提示），回车或点按钮提交 */
+const teamNameInput = ref('')
+watch([myTeam, roomState], () => {
+  const p = players.value || {}
+  const mine = myTeam.value === 'A' ? p.red : myTeam.value === 'B' ? p.blue : null
+  teamNameInput.value = mine && mine.name && mine.name !== TEAM_NAME[myTeam.value] ? mine.name : ''
+})
+async function saveTeamName() {
+  if (!myTeam.value || !roomCode.value) return
+  const name = teamNameInput.value.trim()
+  if (!name) { flashTip('阵营名不能为空。', 'warn'); return }
+  if (name.length > 12) { flashTip('阵营名最多 12 个字。', 'err'); return }
+  try {
+    await rtdbPatch(`rooms/${roomCode.value}/players/${myTeam.value === 'A' ? 'red' : 'blue'}`, { name })
+    flashTip('✓ 阵营名已更新，双方界面与战报图都会显示新名字。', 'ok')
+  } catch (e) {
+    flashTip('改名失败：' + (e && e.message), 'err')
+  }
+}
 const TEAM_MARK = { A: '赤', B: '青' }
 /* 建议回合数：大致把棋盘涂到 4~5 成（10×10 → 20 轮、8×8 → 15 轮） */
 const SUGGEST_ROUNDS = { 5: 8, 6: 10, 7: 12, 8: 15, 9: 17, 10: 20, 11: 23, 12: 26, 13: 29, 14: 33, 15: 37, 16: 41, 17: 45, 18: 49, 19: 53, 20: 57 }
@@ -375,7 +399,7 @@ const currentRound = computed(() => {
 })
 const phaseText = computed(() => {
   if (gameState.phase === 'ready') return '待开局'
-  if (gameState.phase === 'playing') return `进行中 · 轮到 ${TEAM_NAME[currentTeam.value]}`
+  if (gameState.phase === 'playing') return `进行中 · 轮到 ${teamNames.value[currentTeam.value]}`
   return '对战结束'
 })
 const startLabel = computed(() =>
@@ -452,6 +476,7 @@ function exportGameCtx() {
     totalRounds: gameState.totalRounds,
     endless: gameState.endless,
     round: currentRound.value,
+    names: teamNames.value,
     hitKinds,
   }
 }
@@ -533,7 +558,7 @@ function onCellClick(idx) {
   const next = order[(order.indexOf(cur) + 1) % 3]
   gameState.board[idx].owner = next
   syncState()
-  flashTip(`修正：${gameState.board[idx].ch} → ${next ? TEAM_NAME[next] : '无主'}`, 'ok')
+  flashTip(`修正：${gameState.board[idx].ch} → ${next ? teamNames.value[next] : '无主'}`, 'ok')
 }
 
 /* 字号随格子实际宽度走：5×5 不至于小字淹没，20×20 不至于挤成一团 */
@@ -686,7 +711,7 @@ async function submitLine() {
   previewSet.value = new Set()
   markChanged(changed)
   flashTip(
-    `✓ ${TEAM_NAME[me]} 飞花成功：命中 ${hits.length} 格 → 新占 ${blanks.length} · 抢夺 ${captures.length} · 己方 ${holds.length}。` +
+    `✓ ${teamNames.value[me]} 飞花成功：命中 ${hits.length} 格 → 新占 ${blanks.length} · 抢夺 ${captures.length} · 己方 ${holds.length}。` +
       (captures.length ? `（从对方手中抢下 ${captures.length} 格 🔥）` : ''),
     'ok'
   )
@@ -721,7 +746,7 @@ function passTurn() {
     turnNo: gameState.turnNo,
   })
   gameState.log.push({ type: 'pass', team: me, round: currentRound.value })
-  flashTip(`已记录：${TEAM_NAME[me]} 放弃本回合，未涂色。`, 'warn')
+  flashTip(`已记录：${teamNames.value[me]} 放弃本回合，未涂色。`, 'warn')
   advance()
   syncState()
 }
@@ -763,11 +788,11 @@ const resultInfo = computed(() => {
   const c = score.value
   let win, name, color
   if (c.a > c.b) {
-    win = '赤营获胜'; name = `赤营 ${c.a} : ${c.b} 青营`; color = 'var(--ink-a)'
+    win = teamNames.value.A + '获胜'; name = `${teamNames.value.A} ${c.a} : ${c.b} ${teamNames.value.B}`; color = 'var(--ink-a)'
   } else if (c.b > c.a) {
-    win = '青营获胜'; name = `青营 ${c.b} : ${c.a} 赤营`; color = 'var(--ink-b)'
+    win = teamNames.value.B + '获胜'; name = `${teamNames.value.B} ${c.b} : ${c.a} ${teamNames.value.A}`; color = 'var(--ink-b)'
   } else {
-    win = '平局'; name = `赤营 ${c.a} : ${c.b} 青营`; color = '#5B6B84'
+    win = '平局'; name = `${teamNames.value.A} ${c.a} : ${c.b} ${teamNames.value.B}`; color = '#5B6B84'
   }
   const label =
     '对战结束 · ' +
@@ -885,7 +910,7 @@ function onExtraChange() {
   const k = parseInt(extraInput.value, 10) || 0
   redrawForSetup()
   syncState()
-  flashTip(k ? `已重铺棋盘：其中 ${k} 个额外字（按唐诗频次加权抽取）。` : '已重铺棋盘：关闭额外字，只用基础 300 字。', 'ok')
+  flashTip(k ? `已重铺棋盘：其中 ${k} 个额外字（按唐诗+宋词合计频次加权抽取）。` : '已重铺棋盘：关闭额外字，只用基础 600 字。', 'ok')
 }
 function onRoundChange() {
   if (gameState.phase === 'playing') return
@@ -1014,7 +1039,7 @@ onMounted(() => window.addEventListener('resize', sizeCellFont))
         <span class="conn" :class="fbStatus" :title="fbError || connText"><i></i>{{ connText }}</span>
         <span style="color:#98a4b3;font-size:12px;margin-left:6px;font-weight:600">v2.3</span>
         <span v-if="roomState === 'playing'" class="conn room">房间 {{ roomCode }}</span>
-        <span v-if="roomState === 'playing'" class="conn room">你是{{ myTeam ? TEAM_NAME[myTeam] : '观战' }}</span>
+        <span v-if="roomState === 'playing'" class="conn room">你是{{ myTeam ? teamNames[myTeam] : '观战' }}</span>
         <template v-if="roomState === 'playing'">
           <label class="chk" title="开启后，点击棋盘格子可循环切换：无主 → 赤 → 青 → 无主">
             <input type="checkbox" v-model="fixMode" :disabled="!isHost" /> 修正模式
@@ -1026,7 +1051,7 @@ onMounted(() => window.addEventListener('resize', sizeCellFont))
             <span>× <b>{{ gameState.side }}</b> 格</span>
           </label>
           <label class="sizefield" :class="{ off: gameState.phase === 'playing' }"
-                 title="额外字：从一级字表按唐诗频次加权抽取 K 个放进棋盘（0 = 只用基础 300 字）">
+                 title="额外字：从额外字池（唐诗高频字，已并入基础库的字已剔除）按唐诗+宋词合计频次加权抽取 K 个放进棋盘（0 = 只用基础 600 字）">
             <input type="number" v-model.number="extraInput" min="0" max="289" step="1" inputmode="numeric"
                    :disabled="gameState.phase === 'playing' || !isHost" @change="onExtraChange" />
             <span>个额外字</span>
@@ -1118,10 +1143,10 @@ onMounted(() => window.addEventListener('resize', sizeCellFont))
             <summary>{{ extraOnBoard.length ? `额外字（本局 ${extraOnBoard.length} 个）` : `额外字（本局未启用 · 共 ${EXTRA.length} 字可选）` }}</summary>
             <div class="detbody">
               <div class="poolgrid">
-                <span v-for="ch in extraOnBoard" :key="ch" class="on" :title="`唐诗出现 ${EXTRA_FREQ[ch] || 0} 次`">{{ ch }}</span>
+                <span v-for="ch in extraOnBoard" :key="ch" class="on" :title="`唐诗+宋词出现 ${EXTRA_FREQ[ch] || 0} 次`">{{ ch }}</span>
               </div>
               <p v-if="!extraOnBoard.length" class="poolnote">
-                本局未启用额外字。在顶栏「额外字」填一个数字，就能让其中若干格改从一级字池里抽（按唐诗出现频次加权）。
+                本局未启用额外字。在顶栏「额外字」填一个数字，就能让其中若干格改从<b>额外字池</b>里抽（按唐诗+宋词合计频次加权）。
               </p>
             </div>
           </details>
@@ -1129,7 +1154,7 @@ onMounted(() => window.addEventListener('resize', sizeCellFont))
             <summary>规则与判定逻辑</summary>
             <div class="detbody">
               <ol class="rules">
-                <li>棋盘：从基础字库（《全唐诗》字频前 300 + 《全宋词》高频前 300，共 600 字）中<b>随机抽 N×N 个不重复的字</b>铺成方阵（N 可在顶栏设 5–20）。顶栏「<b>额外字</b>」可指定其中 K 格改从<b>额外字池</b>里抽 —— 抽取<b>按唐诗出现频次加权</b>，越常见的字越容易被抽中。</li>
+                <li>棋盘：从基础字库（《全唐诗》字频前 300 + 《全宋词》高频前 300，共 600 字）中<b>随机抽 N×N 个不重复的字</b>铺成方阵（N 可在顶栏设 5–20）。顶栏「<b>额外字</b>」可指定其中 K 格改从<b>额外字池</b>（唐诗高频字，已并入基础库的字已剔除）里抽 —— 抽取<b>按唐诗与宋词合计频次加权</b>，越常见的字越容易被抽中。</li>
                 <li>涂色：某人飞出一句后，<b>诗句中所有出现在棋盘上的字</b>，对应格子全部涂成该方颜色。</li>
                 <li>合法性：本句命中棋盘的字中，<b>至少要有 1 个格子当前未填色</b>；命中已涂色格可以抢夺。若命中格全都是已有颜色，本句无效。</li>
                 <li>胜负：满设定轮数（双方各飞相同句数）后结算，<b>己方颜色格子多者胜</b>；等同则平局。<b>棋盘提前被填满时立即结算</b>；选「<b>战至最后一刻</b>」时不限轮数，只有棋盘填满或点「提前结算」才结算。</li>
@@ -1182,6 +1207,11 @@ onMounted(() => window.addEventListener('resize', sizeCellFont))
               <button @click="onExportPng" title="生成当前局面战报图（含棋盘与飞花记录）并下载">导出截图</button>
               <button @click="onExportGif" title="生成逐手回放 GIF（从空盘到当前局面）并下载，记录越多耗时越久">导出 GIF</button>
             </div>
+            <div class="row" style="margin-top:10px" v-if="myTeam">
+              <input type="text" v-model="teamNameInput" maxlength="12" style="flex:1;min-width:0"
+                     :placeholder="myTeam === 'A' ? '赤营阵营名' : '青营阵营名'" @keyup.enter="saveTeamName" />
+              <button @click="saveTeamName" title="自定义本方阵营名（最多 12 字），双方界面与战报图统一显示">改阵营名</button>
+            </div>
             <label class="chk" style="margin-top:10px;display:flex">
               <input type="checkbox" v-model="allowDup" /> 允许重复句（默认拦截已出现过的句子）
             </label>
@@ -1200,7 +1230,7 @@ onMounted(() => window.addEventListener('resize', sizeCellFont))
           <div class="pad" style="padding-top:6px">
             <ul class="loglist">
               <li v-for="e in flyLogs" :key="e.round + '-' + e.team" :class="e.team === 'A' ? 'tA' : 'tB'">
-                <span class="badge" :class="e.team === 'A' ? 'bA' : 'bB'" :title="TEAM_NAME[e.team]">{{ TEAM_MARK[e.team] }}</span>
+                <span class="badge" :class="e.team === 'A' ? 'bA' : 'bB'" :title="teamNames[e.team]">{{ TEAM_MARK[e.team] }}</span>
                 <div class="body">
                   <template v-if="e.type === 'pass'">
                     <div class="line" style="color:#5B6B84">—— 放弃本回合 ——</div>
@@ -1248,7 +1278,7 @@ onMounted(() => window.addEventListener('resize', sizeCellFont))
         <div class="poembox">
           <p v-if="!resultFlies.length" style="color:#5B6B84">本局没有有效飞句。</p>
           <p v-for="(e, i) in resultFlies" :key="i" :class="e.team === 'A' ? 'tA' : 'tB'">
-            <span class="tagt" :style="{ color: e.team === 'A' ? 'var(--ink-a)' : 'var(--ink-b)' }">{{ TEAM_NAME[e.team] }}</span><template v-for="(seg, si) in poemSegs(e)" :key="si"><u v-if="seg.kind" class="mk" :class="'mk-' + seg.kind">{{ seg.text }}</u><template v-else>{{ seg.text }}</template></template><span style="color:#5B6B84">　（命中{{ e.hits }}／新占{{ e.blank }}／抢{{ e.capture }}）</span>
+            <span class="tagt" :style="{ color: e.team === 'A' ? 'var(--ink-a)' : 'var(--ink-b)' }">{{ teamNames[e.team] }}</span><template v-for="(seg, si) in poemSegs(e)" :key="si"><u v-if="seg.kind" class="mk" :class="'mk-' + seg.kind">{{ seg.text }}</u><template v-else>{{ seg.text }}</template></template><span style="color:#5B6B84">　（命中{{ e.hits }}／新占{{ e.blank }}／抢{{ e.capture }}）</span>
           </p>
         </div>
         <div class="row" style="margin-top:16px;justify-content:flex-end">
