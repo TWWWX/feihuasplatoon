@@ -1,8 +1,12 @@
-# Cloudflare Worker：诗句词库校验 API
+# Cloudflare Worker：诗句词库校验 API + 房间定时清理 Cron
 # 部署/开发均在项目根目录执行：npx wrangler dev / npx wrangler deploy
 name = "feihua-poetry-api"
 main = "worker/index.js"
 compatibility_date = "2026-09-04"
+
+# 每日 UTC 03:00（北京时间 11:00）清理 createdAt 超 24h 的房间
+[triggers]
+crons = ["0 3 * * *"]
 
 [[d1_databases]]
 binding = "DB"

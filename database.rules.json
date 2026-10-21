@@ -3,7 +3,7 @@
     "rooms": {
       "$roomId": {
         ".read": "auth != null && $roomId.length === 6 && $roomId.matches(/^[A-Z0-9]{6}$/) && (!data.exists() || data.child('players/red/uid').val() === auth.uid || data.child('players/blue/uid').val() === auth.uid)",
-        ".write": "auth != null && $roomId.length === 6 && $roomId.matches(/^[A-Z0-9]{6}$/) && !data.exists()",
+        ".write": "auth != null && $roomId.length === 6 && $roomId.matches(/^[A-Z0-9]{6}$/) && (!data.exists() || data.child('meta/hostUid').val() === auth.uid)",
         "meta": {
           ".read": "auth != null",
           ".validate": "newData.hasChildren(['hostUid', 'createdAt'])",
@@ -133,6 +133,10 @@
         "presence": {
           "host": {
             ".write": "auth != null && root.child('rooms/' + $roomId + '/meta/hostUid').val() === auth.uid",
+            ".validate": "!newData.exists() || newData.isNumber()"
+          },
+          "blue": {
+            ".write": "auth != null && root.child('rooms/' + $roomId + '/players/blue/uid').val() === auth.uid",
             ".validate": "!newData.exists() || newData.isNumber()"
           },
           "$other": { ".validate": false }

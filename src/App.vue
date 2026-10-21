@@ -43,12 +43,28 @@ const myTeam = computed(() => {
   return null
 })
 const isHost = computed(() => roomMeta.value?.hostUid === uid.value)
-/* 房主在线心跳：host 写 presence/host，断线时 RTDB 自动删除；非房主据此显示「对战暂停」 */
+/* 在线心跳：房主写 presence/host，青营写 presence/blue（REST 无 onDisconnect，用时间戳判定）。
+   对方离线只做「标记」，不暂停对战：房主离线时青营仍可正常提交（云端不依赖房主在线）。 */
 const hostOnline = ref(true)
+const blueOnline = ref(true)
 const gotRoomSnapshot = ref(false)
 const hostOffline = computed(
   () => roomState.value === 'playing' && !isHost.value && gotRoomSnapshot.value && !hostOnline.value
 )
+/* 房主视角：青营超过 60 秒没心跳 → 显示离线并可移出（空出席位给新人） */
+const peerOffline = computed(
+  () => roomState.value === 'playing' && isHost.value && gotRoomSnapshot.value && !blueOnline.value
+)
+async function kickBlue() {
+  if (!roomCode.value || !isHost.value) return
+  if (!confirm('将青营移出房间？对方会立刻回到大厅，席位空出后新人可加入。')) return
+  try {
+    await rtdbRemove(`rooms/${roomCode.value}/players/blue`)
+    flashTip('已移出青营，席位已空出。', 'ok')
+  } catch (e) {
+    flashTip('移出失败：' + (e && e.message), 'err')
+  }
+}
 /* 回合锁：只有轮到自己阵营时才能出牌（观战身份不能出牌） */
 const myTurn = computed(() => myTeam.value !== null && currentTeam.value === myTeam.value)
 
@@ -165,12 +181,19 @@ function startPolling(code) {
       val = await rtdbGet(`rooms/${code}`)
       if (fbStatus.value !== 'ok') fbStatus.value = 'ok'
     } catch (e) {
+      /* 被房主移出后 read 规则失效（permission denied / 401）→ 判定被踢，回大厅 */
+      if (/permission denied|401|403/i.test(String((e && e.message) || e))) {
+        stopPolling()
+        exitRoom('kicked')
+        return
+      }
       fbStatus.value = 'lost'
       return
     }
     if (!val) {
-      flashTip('房间数据不存在（可能已被删除）。', 'warn')
+      /* 房间被房主解散（rooms/{code} 不存在）→ 回大厅 */
       stopPolling()
+      exitRoom('dismissed')
       return
     }
     /* 房主心跳：REST 没有 onDisconnect，用时间戳 + 6s 超时判定在线。
@@ -181,6 +204,14 @@ function startPolling(code) {
     } else {
       const ts = val.presence && val.presence.host
       hostOnline.value = typeof ts === 'number' && Date.now() - ts < 6000
+    }
+    /* 青营心跳：blue 成员每次轮询写 presence/blue；房主端超 60 秒没更新判为离线 */
+    if (val.players && val.players.blue && val.players.blue.uid === uid.value) {
+      blueOnline.value = true
+      rtdbSet(`rooms/${code}/presence/blue`, Date.now()).catch(() => {})
+    } else {
+      const ts = val.presence && val.presence.blue
+      blueOnline.value = typeof ts === 'number' && Date.now() - ts < 60000
     }
     /* presence 变化不触发界面刷新，只比对 meta/players/state */
     const json = JSON.stringify([val.meta, val.players, val.state])
@@ -221,25 +252,70 @@ function syncState() {
   )
 }
 
-function enterRoom(code) {
+function enterRoom(code, asHost) {
   roomCode.value = code
   sessionStorage.setItem('fh_room', code)
+  rememberRoom(code, asHost)
   roomState.value = 'playing'
   startPolling(code)
 }
-function exitRoom() {
-  /* 房主退出：清掉在线心跳，对方会在 6 秒内看到「对战暂停」 */
+/* 退出房间：青营删除自己的席位节点（空位可让新人加入）；房主删除整个房间（解散）。
+   reason: 'kicked' 被房主移出 | 'dismissed' 房主解散 | 其余为主动退出 */
+async function exitRoom(reason) {
   stopPolling()
-  if (roomCode.value && roomMeta.value?.hostUid === uid.value) {
-    rtdbRemove(`rooms/${roomCode.value}/presence/host`).catch(() => {})
+  const code = roomCode.value
+  if (code && !reason) {
+    if (roomMeta.value?.hostUid === uid.value) {
+      rtdbRemove(`rooms/${code}`).catch(() => {})
+    } else if (players.value.blue?.uid === uid.value) {
+      rtdbRemove(`rooms/${code}/players/blue`).catch(() => {})
+    } else {
+      rtdbRemove(`rooms/${code}/presence/host`).catch(() => {})
+    }
   }
   sessionStorage.removeItem('fh_room')
   roomCode.value = ''
   players.value = {}
   roomMeta.value = null
   hostOnline.value = true
+  blueOnline.value = true
   gotRoomSnapshot.value = false
   roomState.value = 'lobby'
+  if (reason === 'kicked') lobbyMsg.value = { text: '你已被房主移出房间。', kind: 'warn' }
+  if (reason === 'dismissed') lobbyMsg.value = { text: '房主已解散房间。', kind: 'warn' }
+}
+
+/* ---- 最近加入的房间（localStorage 持久化，最多 5 条） ---- */
+const RECENT_KEY = 'fh_recent_rooms'
+const recentRooms = ref(loadRecentRooms())
+function loadRecentRooms() {
+  try {
+    const list = JSON.parse(localStorage.getItem(RECENT_KEY) || '[]')
+    return Array.isArray(list) ? list.filter((r) => r && r.code) : []
+  } catch {
+    return []
+  }
+}
+function rememberRoom(code, asHost) {
+  const list = loadRecentRooms().filter((r) => r.code !== code)
+  list.unshift({ code, at: Date.now(), host: !!asHost })
+  localStorage.setItem(RECENT_KEY, JSON.stringify(list.slice(0, 5)))
+  recentRooms.value = loadRecentRooms()
+}
+function relTime(ts) {
+  const m = Math.floor((Date.now() - ts) / 60000)
+  if (m < 1) return '刚刚'
+  if (m < 60) return m + ' 分钟前'
+  const h = Math.floor(m / 60)
+  if (h < 24) return h + ' 小时前'
+  const d = Math.floor(h / 24)
+  if (d < 7) return d + ' 天前'
+  return new Date(ts).toLocaleDateString('zh-CN')
+}
+function rejoin(r) {
+  if (roomBusy.value) return
+  joinCode.value = r.code
+  joinRoom()
 }
 
 async function createRoom() {
@@ -275,7 +351,7 @@ async function createRoom() {
       state: localToCloudState(),
     })
     lobbyMsg.value = null
-    enterRoom(code)
+    enterRoom(code, true)
   } catch (e) {
     lobbyMsg.value = { text: '创建房间失败：' + e.message, kind: 'err' }
   } finally {
@@ -314,7 +390,7 @@ async function joinRoom() {
     }
     /* 房主本人重连，或自己已在蓝位（幂等覆盖），都直接进入 */
     lobbyMsg.value = null
-    enterRoom(code)
+    enterRoom(code, meta.hostUid === uid.value)
   } catch (e) {
     lobbyMsg.value = { text: '加入房间失败：' + e.message, kind: 'err' }
   } finally {
@@ -486,11 +562,11 @@ const onExportGif = () => exportShotGif(exportGameCtx(), flashTip)
 /* 出手前预览：输入句命中的格子刷成当前回合方的半透明色 */
 const poemInput = ref('')
 const previewSet = ref(new Set())
-/* 回合锁：未轮到自己 / 房主离线 / 未开局 时锁定输入框 */
-const poemLocked = computed(() => gameState.phase !== 'playing' || !myTurn.value || hostOffline.value)
+/* 回合锁：未轮到自己 / 未开局 时锁定输入框（房主离线只标记不暂停，云端不依赖房主在线） */
+const poemLocked = computed(() => gameState.phase !== 'playing' || !myTurn.value)
 const poemPlaceholder = computed(() => {
   if (gameState.phase !== 'playing') return '点击上方「开始对战」后解锁'
-  if (!myTurn.value || hostOffline.value) return '等待对方出牌...'
+  if (!myTurn.value) return '等待对方出牌...'
   return '在此输入诗句，如：床前明月光，疑是地上霜（回车提交）'
 })
 function updatePreview() {
@@ -639,10 +715,7 @@ async function submitLine() {
     flashTip(myTeam.value === null ? '观战身份不能出牌。' : '还没轮到你出牌，请等待对方。', 'err')
     return
   }
-  if (hostOffline.value) {
-    flashTip('房主已离线，对战暂停。', 'warn')
-    return
-  }
+  /* 房主离线不阻断：state 写云端不依赖房主客户端在线 */
   const raw = poemInput.value
   const chars = cjkOnly(raw)
   if (!chars) {
@@ -735,7 +808,7 @@ function advance() {
 
 function passTurn() {
   if (gameState.phase !== 'playing') return
-  if (!myTurn.value || hostOffline.value) {
+  if (!myTurn.value) {
     flashTip(myTeam.value === null ? '观战身份不能出牌。' : '还没轮到你出牌，请等待对方。', 'err')
     return
   }
@@ -1012,7 +1085,7 @@ onMounted(async () => {
   if (saved && uid.value) {
     try {
       const snap = await rtdbGet(`rooms/${saved}`)
-      if (snap) enterRoom(saved)
+      if (snap) enterRoom(saved, snap.meta && snap.meta.hostUid === uid.value)
       else sessionStorage.removeItem('fh_room')
     } catch (e) {
       sessionStorage.removeItem('fh_room')
@@ -1087,6 +1160,14 @@ onMounted(() => window.addEventListener('resize', sizeCellFont))
             <input type="text" v-model="joinCode" placeholder="输入 6 位房间码" maxlength="6" @keyup.enter="joinRoom" />
             <button :disabled="roomBusy || !uid" @click="joinRoom">加入房间</button>
           </div>
+          <div v-if="recentRooms.length" class="recent">
+            <p class="recent-title">最近加入的房间</p>
+            <div v-for="r in recentRooms" :key="r.code" class="recent-row">
+              <span class="rcode">{{ r.code }}</span>
+              <span class="rmeta">{{ r.host ? '我是房主' : '青营席位' }} · {{ relTime(r.at) }}</span>
+              <button :disabled="roomBusy || !uid" title="房主重连或以青营加入；房间已被解散时会有提示">进入</button>
+            </div>
+          </div>
           <p v-if="uid" class="uidline">匿名 UID：{{ uid }}</p>
         </div>
       </div>
@@ -1094,7 +1175,11 @@ onMounted(() => window.addEventListener('resize', sizeCellFont))
 
     <!-- ========== 游戏主界面 ========== -->
     <div v-else class="layout">
-      <div v-if="hostOffline" class="banner">房主已离线，对战暂停 —— 等待房主回来后再继续。</div>
+      <div v-if="hostOffline" class="banner">房主已离线 —— 对战不会暂停，可直接继续提交；房主回来后自动恢复。</div>
+      <div v-if="peerOffline" class="banner">
+        对方已离线超过 60 秒。
+        <button @click="kickBlue" title="移出后席位空出，新人可加入；对方会被带回大厅">移出{{ teamNames.B }}</button>
+      </div>
       <!-- 左：棋盘 -->
       <div class="side">
         <div class="card">
@@ -1104,10 +1189,12 @@ onMounted(() => window.addEventListener('resize', sizeCellFont))
             </div>
             <div class="teams">
               <div class="team tA" :class="{ active: gameState.phase === 'playing' && currentTeam === 'A' }">
-                <span class="swatch"></span>赤营 <span class="num">{{ score.a }}</span>
+                <span class="swatch"></span>{{ teamNames.A }} <span class="num">{{ score.a }}</span>
+                <span v-if="myTeam === 'B' && hostOffline" class="offbadge" title="超过 6 秒没有心跳">离线</span>
               </div>
               <div class="team tB" :class="{ active: gameState.phase === 'playing' && currentTeam === 'B' }">
-                <span class="swatch"></span>青营 <span class="num">{{ score.b }}</span>
+                <span class="swatch"></span>{{ teamNames.B }} <span class="num">{{ score.b }}</span>
+                <span v-if="myTeam === 'A' && peerOffline" class="offbadge" title="超过 60 秒没有心跳">离线</span>
               </div>
             </div>
           </div>
@@ -1198,10 +1285,10 @@ onMounted(() => window.addEventListener('resize', sizeCellFont))
             </div>
             <div class="row" style="margin-top:12px">
               <button class="primary submit" :class="currentTeam === 'A' ? 'team-a' : 'team-b'"
-                      :disabled="gameState.phase !== 'playing' || !myTurn || hostOffline" @click="submitLine">
+                      :disabled="gameState.phase !== 'playing' || !myTurn" @click="submitLine">
                 {{ myTurn ? '提交飞花（回车）' : '等待对方出牌...' }}
               </button>
-              <button :disabled="gameState.phase !== 'playing' || !myTurn || hostOffline" @click="passTurn">放弃本回合</button>
+              <button :disabled="gameState.phase !== 'playing' || !myTurn" @click="passTurn">放弃本回合</button>
             </div>
             <div class="row" style="margin-top:10px">
               <button @click="onExportPng" title="生成当前局面战报图（含棋盘与飞花记录）并下载">导出截图</button>
@@ -1265,13 +1352,13 @@ onMounted(() => window.addEventListener('resize', sizeCellFont))
         <div class="winner">{{ resultInfo.label }}</div>
         <div class="winname" :style="{ color: resultInfo.color }">{{ resultInfo.win }} ｜ {{ resultInfo.name }}</div>
         <div class="final">
-          <div class="fbox"><div class="fv" style="color:var(--ink-a)">{{ score.a }}</div><div class="fk">赤营格子</div></div>
-          <div class="fbox"><div class="fv" style="color:var(--ink-b)">{{ score.b }}</div><div class="fk">青营格子</div></div>
+          <div class="fbox"><div class="fv" style="color:var(--ink-a)">{{ score.a }}</div><div class="fk">{{ teamNames.A }}格子</div></div>
+          <div class="fbox"><div class="fv" style="color:var(--ink-b)">{{ score.b }}</div><div class="fk">{{ teamNames.B }}格子</div></div>
           <div class="fbox"><div class="fv" style="color:#5B6B84">{{ score.n }}</div><div class="fk">未被涂色</div></div>
         </div>
         <div class="statgrid">
-          <div>赤营出手 <b>{{ flyCount('A') }} 句</b></div>
-          <div>青营出手 <b>{{ flyCount('B') }} 句</b></div>
+          <div>{{ teamNames.A }}出手 <b>{{ flyCount('A') }} 句</b></div>
+          <div>{{ teamNames.B }}出手 <b>{{ flyCount('B') }} 句</b></div>
           <div>双方抢夺合计 <b>{{ capTotal() }} 格</b></div>
         </div>
         <h3>飞句全记录</h3>
@@ -1283,7 +1370,7 @@ onMounted(() => window.addEventListener('resize', sizeCellFont))
         </div>
         <div class="row" style="margin-top:16px;justify-content:flex-end">
           <button @click="showResult = false">返回棋盘</button>
-          <button class="primary" :disabled="!isHost" title="仅房主可开新局" @click="again">再来一局</button>
+          <button class="primary" :disabled="!isHost" title="仅房主可开新局；房间保留、双方无需重新加入，直接重开一盘" @click="again">再来一局</button>
         </div>
       </div>
     </div>
@@ -1349,6 +1436,18 @@ input[type=number]:disabled,select:disabled{background:#F2F5FA;border-color:#E1E
 .joinrow{margin-top:10px;}
 .joinrow input{flex:1 1 auto;}
 .uidline{margin:14px 0 0;font-size:12px;font-family:ui-monospace,Consolas,monospace;color:var(--muted);word-break:break-all;}
+
+/* ---------- 大厅：最近加入的房间 ---------- */
+.recent{margin-top:16px;border-top:1px dashed var(--line);padding-top:12px;}
+.recent-title{margin:0 0 8px;font-size:12px;font-weight:700;color:var(--muted);letter-spacing:.5px;}
+.recent-row{display:flex;align-items:center;gap:10px;padding:6px 0;}
+.recent-row .rcode{font-family:ui-monospace,Consolas,monospace;font-weight:700;font-size:15px;letter-spacing:2px;}
+.recent-row .rmeta{flex:1;min-width:0;font-size:12px;color:var(--muted);}
+.recent-row button{padding:5px 12px;}
+
+/* ---------- 对局在线状态徽标 ---------- */
+.offbadge{display:inline-block;margin-left:6px;font-size:11px;font-weight:600;color:#B4433A;background:#FBEDEC;border:1px solid #F0C7C4;border-radius:999px;padding:1px 8px;vertical-align:1px;}
+.banner button{margin-left:10px;padding:5px 12px;font-size:12px;}
 
 /* ---------- layout ---------- */
 .layout{display:grid;grid-template-columns:minmax(0,1fr) 396px;gap:18px;align-items:start;}

@@ -41,4 +41,98 @@ export default {
       return json({ found: false, error: String(e && e.message) }, 500)
     }
   },
+
+  /* ================= 定时清理：每日删除 createdAt 超过 24 小时的房间 =================
+     需要两个 Secret（Firebase 控制台 → 项目设置 → 服务账号 → 生成新私钥）：
+       npx wrangler secret put FIREBASE_SA_EMAIL   # client_email
+       npx wrangler secret put FIREBASE_SA_KEY     # private_key（PEM 全文）
+     手动触发测试：npx wrangler deploy 后在 Cloudflare 控制台 Worker → Settings
+       → Cron Triggers 点 Run，或 curl 该 Worker 的 /api/poetry 确认活着。 */
+  async scheduled(event, env, ctx) {
+    ctx.waitUntil(
+      cleanupRooms(env).then(
+        (r) => console.log('[cleanup]', r),
+        (e) => console.error('[cleanup] failed:', String(e && e.message))
+      )
+    )
+  },
+}
+
+/* ---- 服务账号 JWT（RS256, WebCrypto）→ OAuth2 access token ---- */
+function b64urlFromBytes(bytes) {
+  let s = ''
+  for (const b of bytes) s += String.fromCharCode(b)
+  return btoa(s).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '')
+}
+function b64urlFromText(text) {
+  return b64urlFromBytes(new TextEncoder().encode(text))
+}
+function pemToDer(pem) {
+  const b64 = pem.replace(/-----(BEGIN|END) PRIVATE KEY-----/g, '').replace(/\s+/g, '')
+  const raw = atob(b64)
+  const buf = new Uint8Array(raw.length)
+  for (let i = 0; i < raw.length; i++) buf[i] = raw.charCodeAt(i)
+  return buf.buffer
+}
+async function getAccessToken(env) {
+  const now = Math.floor(Date.now() / 1000)
+  const header = b64urlFromText(JSON.stringify({ alg: 'RS256', typ: 'JWT' }))
+  const payload = b64urlFromText(
+    JSON.stringify({
+      iss: env.FIREBASE_SA_EMAIL,
+      scope: 'https://www.googleapis.com/auth/firebase.database https://www.googleapis.com/auth/userinfo.email',
+      aud: 'https://oauth2.googleapis.com/token',
+      iat: now,
+      exp: now + 3600,
+    })
+  )
+  const key = await crypto.subtle.importKey(
+    'pkcs8',
+    pemToDer(env.FIREBASE_SA_KEY),
+    { name: 'RSASSA-PKCS1-v1_5', hash: 'SHA-256' },
+    false,
+    ['sign']
+  )
+  const sig = await crypto.subtle.sign('RSASSA-PKCS1-v1_5', key, new TextEncoder().encode(`${header}.${payload}`))
+  const jwt = `${header}.${payload}.${b64urlFromBytes(new Uint8Array(sig))}`
+  const res = await fetch('https://oauth2.googleapis.com/token', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+    body: new URLSearchParams({
+      grant_type: 'urn:ietf:params:oauth:grant-type:jwt-bearer',
+      assertion: jwt,
+    }),
+  })
+  const j = await res.json()
+  if (!j.access_token) throw new Error('oauth failed: ' + JSON.stringify(j).slice(0, 300))
+  return j.access_token
+}
+
+/* ---- shallow 扫 rooms → 逐个看 meta.createdAt → 超 24h 删除 ---- */
+const RTDB = 'https://feihuasplatoon-default-rtdb.asia-southeast1.firebasedatabase.app'
+async function cleanupRooms(env) {
+  const token = await getAccessToken(env)
+  const auth = `access_token=${encodeURIComponent(token)}`
+  const res = await fetch(`${RTDB}/rooms.json?${auth}&shallow=true`)
+  if (!res.ok) throw new Error(`rooms scan failed: HTTP ${res.status}`)
+  const keys = await res.json()
+  if (!keys || typeof keys !== 'object') return 'no rooms'
+  const cutoff = Date.now() - 24 * 3600 * 1000
+  let scanned = 0
+  let removed = 0
+  for (const id of Object.keys(keys)) {
+    scanned++
+    try {
+      const m = await fetch(`${RTDB}/rooms/${id}/meta.json?${auth}`)
+      const meta = await m.json()
+      if (meta && typeof meta.createdAt === 'number' && meta.createdAt < cutoff) {
+        const del = await fetch(`${RTDB}/rooms/${id}.json?${auth}`, { method: 'DELETE' })
+        if (del.ok) removed++
+        else console.error(`[cleanup] delete ${id} → HTTP ${del.status}`)
+      }
+    } catch (e) {
+      console.error(`[cleanup] room ${id}:`, String(e && e.message))
+    }
+  }
+  return `scanned=${scanned} removed=${removed}`
 }
