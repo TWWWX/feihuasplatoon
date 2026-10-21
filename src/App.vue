@@ -299,12 +299,15 @@ async function joinRoom() {
     const meta = await rtdbGet(`rooms/${code}/meta`)
     if (!meta) throw new Error('房间不存在，请核对房间码')
     if (meta.hostUid !== uid.value) {
-      /* 蓝位已有他人则拒绝；否则 PATCH 占位（规则保证不能覆盖他人 uid） */
-      const blue = await rtdbGet(`rooms/${code}/players/blue`)
-      if (blue && blue.uid && blue.uid !== uid.value) {
-        throw new Error('房间已满（赤青两营均有玩家），无法加入')
+      /* 直接 PATCH 占青营，不能先读 blue（非成员无读取权限，会被规则拒绝）：
+         空位写入成功；已被他人占用时规则拒绝 → 房间已满；蓝位是自己 uid（刷新重连）则放行 */
+      try {
+        await rtdbPatch(`rooms/${code}/players/blue`, { uid: uid.value, name: '玩家' })
+      } catch (e) {
+        if (/permission denied|401|403/i.test(String((e && e.message) || e)))
+          throw new Error('房间已满（赤青两营均有玩家），无法加入')
+        throw e
       }
-      await rtdbPatch(`rooms/${code}/players/blue`, { uid: uid.value, name: '玩家' })
     }
     /* 房主本人重连，或自己已在蓝位（幂等覆盖），都直接进入 */
     lobbyMsg.value = null
