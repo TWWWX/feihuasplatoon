@@ -304,6 +304,8 @@ async function joinRoom() {
       try {
         await rtdbPatch(`rooms/${code}/players/blue`, { uid: uid.value, name: '玩家' })
       } catch (e) {
+        /* 透出 Firebase 原始错误文本，便于区分 Permission denied / Data validation failed */
+        console.error('[join] PATCH players/blue 被拒：', e && e.message)
         if (/permission denied|401|403/i.test(String((e && e.message) || e)))
           throw new Error('房间已满（赤青两营均有玩家），无法加入')
         throw e
@@ -1030,6 +1032,7 @@ onMounted(() => window.addEventListener('resize', sizeCellFont))
       <h1>飞花斯普拉遁<span class="tag">主持台</span></h1>
       <div class="head-tools">
         <span class="conn" :class="fbStatus" :title="fbError || connText"><i></i>{{ connText }}</span>
+        <span style="color:#98a4b3;font-size:12px;margin-left:6px;font-weight:600">v2.1</span>
         <span v-if="roomState === 'playing'" class="conn room">房间 {{ roomCode }}</span>
         <span v-if="roomState === 'playing'" class="conn room">你是{{ myTeam ? TEAM_NAME[myTeam] : '观战' }}</span>
         <template v-if="roomState === 'playing'">

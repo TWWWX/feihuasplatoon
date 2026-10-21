@@ -97,6 +97,7 @@ async function authedRequest(method, path, body) {
       const j = await res.json()
       if (j && j.error) msg = typeof j.error === 'string' ? j.error : j.error.message || msg
     } catch {}
+    console.error(`[api] ${method} ${cleanPath} → ${res.status}: ${msg}`)
     throw new Error(msg)
   }
   const text = await res.text()
