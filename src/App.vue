@@ -57,10 +57,10 @@ const peerOffline = computed(
 )
 async function kickBlue() {
   if (!roomCode.value || !isHost.value) return
-  if (!confirm('将青营移出房间？对方会立刻回到大厅，席位空出后新人可加入。')) return
+  if (!confirm(`将「${teamNames.value.B}」移出房间？对方会立刻回到大厅，席位空出后新人可加入。`)) return
   try {
     await rtdbRemove(`rooms/${roomCode.value}/players/blue`)
-    flashTip('已移出青营，席位已空出。', 'ok')
+    flashTip(`已移出「${teamNames.value.B}」，席位已空出。`, 'ok')
   } catch (e) {
     flashTip('移出失败：' + (e && e.message), 'err')
   }
@@ -205,8 +205,12 @@ function startPolling(code) {
       const ts = val.presence && val.presence.host
       hostOnline.value = typeof ts === 'number' && Date.now() - ts < 6000
     }
-    /* 青营心跳：blue 成员每次轮询写 presence/blue；房主端超 60 秒没更新判为离线 */
-    if (val.players && val.players.blue && val.players.blue.uid === uid.value) {
+    /* 青营心跳：blue 成员每次轮询写 presence/blue；房主端超 60 秒没更新判为离线。
+       席位为空时谈不上离线，保持在线（否则刚建房的房主会看到「对方已离线」） */
+    const blueSeat = val.players && val.players.blue
+    if (!blueSeat) {
+      blueOnline.value = true
+    } else if (blueSeat.uid === uid.value) {
       blueOnline.value = true
       rtdbSet(`rooms/${code}/presence/blue`, Date.now()).catch(() => {})
     } else {
@@ -952,8 +956,8 @@ function startGame() {
   resetTimer()
   flashTip(
     gameState.endless
-      ? '开局（战至最后一刻）！由 赤营 先飞。棋盘填满或点「提前结算」时结算。'
-      : '开局！由 赤营 先飞。每句必须至少用一个未涂色的命中格。',
+      ? '开局（战至最后一刻）！由 ' + teamNames.value.A + ' 先飞。棋盘填满或点「提前结算」时结算。'
+      : '开局！由 ' + teamNames.value.A + ' 先飞。每句必须至少用一个未涂色的命中格。',
     'ok'
   )
   focusPoem()
@@ -1165,7 +1169,7 @@ onMounted(() => window.addEventListener('resize', sizeCellFont))
             <div v-for="r in recentRooms" :key="r.code" class="recent-row">
               <span class="rcode">{{ r.code }}</span>
               <span class="rmeta">{{ r.host ? '我是房主' : '青营席位' }} · {{ relTime(r.at) }}</span>
-              <button :disabled="roomBusy || !uid" title="房主重连或以青营加入；房间已被解散时会有提示">进入</button>
+              <button :disabled="roomBusy || !uid" title="房主重连或以青营加入；房间已被解散时会有提示" @click="rejoin(r)">进入</button>
             </div>
           </div>
           <p v-if="uid" class="uidline">匿名 UID：{{ uid }}</p>
@@ -1204,8 +1208,8 @@ onMounted(() => window.addEventListener('resize', sizeCellFont))
               <span class="seg-b" :style="{ width: ((score.b / cellTotal) * 100).toFixed(2) + '%' }"></span>
             </div>
             <div class="scorelegend">
-              <span><i class="k-a"></i>赤营 <b>{{ score.a }}</b> 格</span>
-              <span><i class="k-b"></i>青营 <b>{{ score.b }}</b> 格</span>
+              <span><i class="k-a"></i>{{ teamNames.A }} <b>{{ score.a }}</b> 格</span>
+              <span><i class="k-b"></i>{{ teamNames.B }} <b>{{ score.b }}</b> 格</span>
               <span><i class="k-n"></i>空白 <b>{{ score.n }}</b> 格</span>
               <span>已出手 <b>{{ flyTurns }}</b> 句</span>
             </div>
@@ -1258,10 +1262,10 @@ onMounted(() => window.addEventListener('resize', sizeCellFont))
             <p class="sec-title">当前出手方</p>
             <div class="teams" style="margin-bottom:12px">
               <div class="team tA" :class="{ active: gameState.phase === 'playing' && currentTeam === 'A' }">
-                <span class="swatch"></span>赤营
+                <span class="swatch"></span>{{ teamNames.A }}
               </div>
               <div class="team tB" :class="{ active: gameState.phase === 'playing' && currentTeam === 'B' }">
-                <span class="swatch"></span>青营
+                <span class="swatch"></span>{{ teamNames.B }}
               </div>
             </div>
             <p class="sec-title">录入诗句</p>
@@ -1296,7 +1300,7 @@ onMounted(() => window.addEventListener('resize', sizeCellFont))
             </div>
             <div class="row" style="margin-top:10px" v-if="myTeam">
               <input type="text" v-model="teamNameInput" maxlength="12" style="flex:1;min-width:0"
-                     :placeholder="myTeam === 'A' ? '赤营阵营名' : '青营阵营名'" @keyup.enter="saveTeamName" />
+                     :placeholder="myTeam ? '当前：' + teamNames[myTeam] : ''" @keyup.enter="saveTeamName" />
               <button @click="saveTeamName" title="自定义本方阵营名（最多 12 字），双方界面与战报图统一显示">改阵营名</button>
             </div>
             <label class="chk" style="margin-top:10px;display:flex">

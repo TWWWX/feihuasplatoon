@@ -349,10 +349,14 @@ function drawShotRecords(ctx, g, x, y, m, G) {
 function buildShotCanvas(g) {
   const m = shotMetrics(g)
   const cv = document.createElement('canvas')
-  const s = 2 /* 2 倍分辨率，贴到聊天窗口也不糊 */
+  /* 2 倍分辨率；但 iOS Safari 画布总面积上限约 16.7M px²（4096×4096），
+     超限时 getContext('2d') 直接返回 null —— 按面积自适应降倍率兜底 */
+  const MAX_AREA = 14 * 1024 * 1024
+  let s = 2
+  if (m.W * m.H * s * s > MAX_AREA) s = Math.max(1, Math.floor(Math.sqrt(MAX_AREA / (m.W * m.H))))
   cv.width = m.W * s; cv.height = m.H * s
   const ctx = cv.getContext && cv.getContext('2d')
-  if (!ctx) return cv
+  if (!ctx) return null
   ctx.scale(s, s)
 
   const G = shotColors()
@@ -386,8 +390,11 @@ function buildShotCanvas(g) {
 
 export function exportShotPng(g, flash) {
   let cv = null
-  try { cv = buildShotCanvas(g) } catch (e) { cv = null }
-  if (!cv || !cv.width) {
+  try { cv = buildShotCanvas(g) } catch (e) {
+    console.error('[export] buildShotCanvas 异常：', e)
+    cv = null
+  }
+  if (!cv) {
     flash('✕ 当前环境不支持导出截图（无法创建画布）。', 'err')
     return
   }
