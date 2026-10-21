@@ -4,7 +4,7 @@
    - 说明：idToken 有效期 1 小时；refresh 依赖代理转发 securetoken /v1/token，
      若代理不支持则降级重新匿名注册（uid 会变，需重新加入房间） */
 
-const PROXY = 'https://silent-mud-93b9.tulin5937.workers.dev'
+const PROXY = '/fb-proxy' // 同域 Pages Functions 代理；本地 dev 由 vite server.proxy 转发到线上 Pages
 const API_KEY = 'AIzaSyAhkpwJLeTeyq5_pmUSGGYfb6bvgXnFOic'
 
 const LS_TOKEN = 'fh_idToken'
