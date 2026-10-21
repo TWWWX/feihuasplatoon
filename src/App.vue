@@ -1,8 +1,6 @@
 <script setup>
 import { ref, reactive, computed, onMounted, onBeforeUnmount, watch, nextTick } from 'vue'
-import { signInAnonymously } from 'firebase/auth'
-import { ref as dbRef, onValue, get, set, update, remove, onDisconnect } from 'firebase/database'
-import { auth, db } from './firebase'
+import { ensureAuth, rtdbGet, rtdbSet, rtdbPatch, rtdbRemove } from './api'
 import { POOL, POOL_SET, EXTRA, EXTRA_WT, EXTRA_FREQ } from './game/pools'
 
 /* ================= Firebase 连接状态（仅连接指示，游戏数据同步后续阶段接入） ================= */
@@ -153,58 +151,52 @@ function cloudToLocalState(st) {
   }
 }
 
-/* ---- 实时监听 ---- */
-let roomUnsub = null
-let presenceUnsub = null
-let presenceSetupFor = ''
-/* 房主登记在线状态：断线时 RTDB 服务端自动删除 presence/host */
-function setupHostPresence(code) {
-  if (presenceSetupFor === code) return
-  presenceSetupFor = code
-  const hostRef = dbRef(db, `rooms/${code}/presence/host`)
-  onDisconnect(hostRef)
-    .remove()
-    .then(() => set(hostRef, Date.now()))
-    .catch(() => {})
+/* ---- 轮询同步（REST 无长连接：1s 拉整房，内容有变化才写回本地） ---- */
+let pollTimer = null
+let lastRoomJson = ''
+
+function startPolling(code) {
+  stopPolling()
+  lastRoomJson = ''
+  pollTimer = setInterval(async () => {
+    let val = null
+    try {
+      val = await rtdbGet(`rooms/${code}`)
+      if (fbStatus.value !== 'ok') fbStatus.value = 'ok'
+    } catch (e) {
+      fbStatus.value = 'lost'
+      return
+    }
+    if (!val) {
+      flashTip('房间数据不存在（可能已被删除）。', 'warn')
+      stopPolling()
+      return
+    }
+    /* 房主心跳：REST 没有 onDisconnect，用时间戳 + 6s 超时判定在线 */
+    if (val.meta && val.meta.hostUid === uid.value) {
+      hostOnline.value = true
+      rtdbPatch(`rooms/${code}/presence/host`, Date.now()).catch(() => {})
+    } else {
+      const ts = val.presence && val.presence.host
+      hostOnline.value = typeof ts === 'number' && Date.now() - ts < 6000
+    }
+    /* presence 变化不触发界面刷新，只比对 meta/players/state */
+    const json = JSON.stringify([val.meta, val.players, val.state])
+    if (json === lastRoomJson) return
+    lastRoomJson = json
+    applyRoomSnapshot(val)
+  }, 1000)
 }
-function attachRoomListener(code) {
-  detachRoom()
-  roomUnsub = onValue(
-    dbRef(db, `rooms/${code}`),
-    (snap) => {
-      const val = snap.val()
-      if (!val) {
-        flashTip('房间数据不存在（可能已被删除）。', 'warn')
-        return
-      }
-      applyRoomSnapshot(val)
-    },
-    (err) => flashTip('房间监听失败：' + err.message, 'err')
-  )
-  presenceUnsub = onValue(
-    dbRef(db, `rooms/${code}/presence/host`),
-    (snap) => {
-      hostOnline.value = snap.exists()
-    },
-    () => {}
-  )
-}
-function detachRoom() {
-  if (roomUnsub) {
-    roomUnsub()
-    roomUnsub = null
-  }
-  if (presenceUnsub) {
-    presenceUnsub()
-    presenceUnsub = null
+function stopPolling() {
+  if (pollTimer) {
+    clearInterval(pollTimer)
+    pollTimer = null
   }
 }
 function applyRoomSnapshot(val) {
   roomMeta.value = val.meta || null
   players.value = val.players || {}
   gotRoomSnapshot.value = true
-  /* 房主每次进入房间都登记在线心跳（含断线重连后重挂） */
-  if (val.meta && val.meta.hostUid === uid.value) setupHostPresence(roomCode.value)
   const st = val.state
   if (!st) return
   const local = cloudToLocalState(st)
@@ -222,7 +214,7 @@ function applyRoomSnapshot(val) {
 /* ---- 把本地最新状态整体推到云端（提交/放弃/撤销/结算/开局/重抽共用） ---- */
 function syncState() {
   if (!roomCode.value) return
-  set(dbRef(db, `rooms/${roomCode.value}/state`), localToCloudState()).catch((err) =>
+  rtdbSet(`rooms/${roomCode.value}/state`, localToCloudState()).catch((err) =>
     flashTip('同步失败：' + err.message, 'err')
   )
 }
@@ -231,17 +223,14 @@ function enterRoom(code) {
   roomCode.value = code
   sessionStorage.setItem('fh_room', code)
   roomState.value = 'playing'
-  attachRoomListener(code)
+  startPolling(code)
 }
 function exitRoom() {
-  /* 房主退出：清掉在线心跳并取消 onDisconnect 登记，对方会看到「对战暂停」 */
+  /* 房主退出：清掉在线心跳，对方会在 6 秒内看到「对战暂停」 */
+  stopPolling()
   if (roomCode.value && roomMeta.value?.hostUid === uid.value) {
-    const hostRef = dbRef(db, `rooms/${roomCode.value}/presence/host`)
-    onDisconnect(hostRef).cancel().catch(() => {})
-    remove(hostRef).catch(() => {})
+    rtdbRemove(`rooms/${roomCode.value}/presence/host`).catch(() => {})
   }
-  presenceSetupFor = ''
-  detachRoom()
   sessionStorage.removeItem('fh_room')
   roomCode.value = ''
   players.value = {}
@@ -262,8 +251,8 @@ async function createRoom() {
     let code = null
     for (let i = 0; i < 5; i++) {
       const c = genCode()
-      const snap = await get(dbRef(db, `rooms/${c}`))
-      if (!snap.exists()) {
+      const snap = await rtdbGet(`rooms/${c}`)
+      if (snap == null) {
         code = c
         break
       }
@@ -278,7 +267,7 @@ async function createRoom() {
     gameState.log = []
     gameState.undoStack = []
     finishReason.value = ''
-    await set(dbRef(db, `rooms/${code}`), {
+    await rtdbSet(`rooms/${code}`, {
       meta: { hostUid: uid.value, createdAt: Date.now() },
       players: { red: { uid: uid.value, name: '房主' } },
       state: localToCloudState(),
@@ -306,17 +295,15 @@ async function joinRoom() {
   roomBusy.value = true
   try {
     /* 规则只把 meta 开放给非成员读取：用 meta 判断房间存在性 */
-    const snap = await get(dbRef(db, `rooms/${code}/meta`))
-    if (!snap.exists()) throw new Error('房间不存在，请核对房间码')
-    if (snap.val().hostUid !== uid.value) {
-      /* 直接尝试占青营：规则保证蓝位已有他人时写入被拒（房主本人/已在蓝位则放行） */
-      try {
-        await update(dbRef(db, `rooms/${code}/players`), { blue: { uid: uid.value, name: '玩家' } })
-      } catch (e) {
-        if (e && (e.code === 'PERMISSION_DENIED' || /permission/i.test(e.message || '')))
-          throw new Error('房间已满（赤青两营均有玩家），无法加入')
-        throw e
+    const meta = await rtdbGet(`rooms/${code}/meta`)
+    if (!meta) throw new Error('房间不存在，请核对房间码')
+    if (meta.hostUid !== uid.value) {
+      /* 蓝位已有他人则拒绝；否则 PATCH 占位（规则保证不能覆盖他人 uid） */
+      const blue = await rtdbGet(`rooms/${code}/players/blue`)
+      if (blue && blue.uid && blue.uid !== uid.value) {
+        throw new Error('房间已满（赤青两营均有玩家），无法加入')
       }
+      await rtdbPatch(`rooms/${code}/players/blue`, { uid: uid.value, name: '玩家' })
     }
     /* 房主本人重连，或自己已在蓝位（幂等覆盖），都直接进入 */
     lobbyMsg.value = null
@@ -423,6 +410,26 @@ function fmtPoem(raw, fallback) {
   if (!s) return fallback || ''
   if (keepPunct.value) return s.replace(/\s*\n+\s*/g, ' ')
   return s.replace(/[^\u3400-\u4DBF\u4E00-\u9FA5\u3007A-Za-z0-9]+/g, ' ').trim() || (fallback || '')
+}
+
+/* ================= 诗句词库校验（Cloudflare Worker + D1） ================= */
+const POETRY_API = 'https://feihua-poetry-api.tulin5937.workers.dev/api/poetry' // 本地调试改回 http://127.0.0.1:8787/api/poetry
+let t2s = null /* opencc-js 懒加载：首次提交才加载词典，不拖慢首屏 */
+async function toSimplified(s) {
+  if (!t2s) {
+    const OpenCC = (await import('opencc-js')).default
+    t2s = OpenCC.Converter({ from: 't', to: 'cn' })
+  }
+  return t2s(s)
+}
+/* 词库查询节流：首个请求立即发出，500ms 内的连按/请求中被拦截（不拖慢正常出牌手感） */
+const poetryBusy = ref(false)
+let poetryLastAt = 0
+/* 词库返回 → 「朝代 · 作者《诗名》」，缺项自动省略 */
+function composePoemMeta(d) {
+  const who = [d.dynasty, d.author].filter((x) => x).join(' · ')
+  const t = d.title ? `《${d.title}》` : ''
+  return who ? who + t : t
 }
 
 /* ================= 棋盘 ================= */
@@ -587,7 +594,7 @@ function poemSegs(e) {
 }
 
 /* ================= 核心判定：飞花 ================= */
-function submitLine() {
+async function submitLine() {
   if (gameState.phase !== 'playing') return
   if (!myTurn.value) {
     flashTip(myTeam.value === null ? '观战身份不能出牌。' : '还没轮到你出牌，请等待对方。', 'err')
@@ -603,12 +610,14 @@ function submitLine() {
     flashTip('请先输入诗句（仅中文汉字会被识别）。', 'err')
     return
   }
-  if (chars.length > 50) {
-    flashTip('诗句过长：最多 50 个汉字。', 'err')
+  if (chars.length > 30) {
+    flashTip('字数过长：词库仅收录 30 字以内的诗句。', 'err')
     return
   }
+  /* 转简体：棋盘与词库都是简体口径，匹配/查库/查重统一用它 */
+  const norm = await toSimplified(chars)
   const set = {}
-  for (const ch of chars) set[ch] = true
+  for (const ch of norm) set[ch] = true
 
   const hits = [], blanks = [], captures = [], holds = []
   const me = currentTeam.value
@@ -631,11 +640,39 @@ function submitLine() {
     return
   }
   if (!allowDup.value) {
-    const dup = gameState.log.some((e) => e.type === 'fly' && e.norm === chars)
+    const dup = gameState.log.some((e) => e.type === 'fly' && e.norm === norm)
     if (dup) {
       flashTip('✕ 重复句：这句已经飞过了。如需放行，请勾选「允许重复句」。', 'err')
       return
     }
+  }
+
+  /* 词库校验：500ms 节流 + 请求中防重入，连按回车不会瞬间打爆接口 */
+  if (poetryBusy.value) {
+    flashTip('正在校验上一句，请稍候…', 'warn')
+    return
+  }
+  const ts = Date.now()
+  if (ts - poetryLastAt < 500) {
+    flashTip('操作太快，请稍候再按。', 'warn')
+    return
+  }
+  poetryLastAt = ts
+  poetryBusy.value = true
+  let poemMeta = ''
+  try {
+    const res = await fetch(`${POETRY_API}?q=${encodeURIComponent(norm)}`)
+    const data = await res.json()
+    if (!data || data.found !== true) {
+      flashTip('该诗句不在诗库中，请重新输入。', 'err')
+      return
+    }
+    poemMeta = composePoemMeta(data.data || {})
+  } catch (e) {
+    /* 网络故障/词库服务未部署时放行本句（仅提示未校验）；明确的 found:false 仍然拦截 */
+    flashTip('词库服务暂不可用，本句未经校验已放行：' + (e && e.message), 'warn')
+  } finally {
+    poetryBusy.value = false
   }
 
   /* 记录快照，供撤销 */
@@ -655,9 +692,9 @@ function submitLine() {
   })
 
   gameState.log.push({
-    type: 'fly', team: me, round: currentRound.value, line: chars, norm: chars,
+    type: 'fly', team: me, round: currentRound.value, line: norm, norm,
     hits: hits.length, blank: blanks.length, capture: captures.length, hold: holds.length,
-    raw: (raw || '').trim(), cells: hits.slice(),
+    raw: (raw || '').trim(), meta: poemMeta, cells: hits.slice(),
   })
 
   previewSet.value = new Set()
@@ -952,18 +989,9 @@ function lockHint() {
 /* ================= 启动 ================= */
 onMounted(async () => {
   try {
-    const cred = await signInAnonymously(auth)
-    uid.value = cred.user.uid
-    onValue(dbRef(db, '.info/connected'), (snap) => {
-      if (snap.val() === true) {
-        fbStatus.value = 'ok'
-        /* 重连后重新登记房主在线心跳（onDisconnect 需重挂） */
-        if (roomState.value === 'playing' && roomCode.value) {
-          presenceSetupFor = ''
-          setupHostPresence(roomCode.value)
-        }
-      } else if (fbStatus.value === 'ok') fbStatus.value = 'lost'
-    })
+    const me = await ensureAuth()
+    uid.value = me.uid
+    fbStatus.value = 'ok'
   } catch (e) {
     fbStatus.value = 'error'
     fbError.value = e.message
@@ -972,8 +1000,8 @@ onMounted(async () => {
   const saved = sessionStorage.getItem('fh_room')
   if (saved && uid.value) {
     try {
-      const snap = await get(dbRef(db, `rooms/${saved}`))
-      if (snap.exists()) enterRoom(saved)
+      const snap = await rtdbGet(`rooms/${saved}`)
+      if (snap) enterRoom(saved)
       else sessionStorage.removeItem('fh_room')
     } catch (e) {
       sessionStorage.removeItem('fh_room')
@@ -987,7 +1015,7 @@ onBeforeUnmount(() => {
   if (timerId) clearInterval(timerId)
   if (changedTimer) clearTimeout(changedTimer)
   window.removeEventListener('resize', sizeCellFont)
-  detachRoom()
+  stopPolling()
 })
 onMounted(() => window.addEventListener('resize', sizeCellFont))
 </script>
@@ -1158,8 +1186,8 @@ onMounted(() => window.addEventListener('resize', sizeCellFont))
             </div>
             <div class="row" style="margin-top:12px">
               <button class="primary submit" :class="currentTeam === 'A' ? 'team-a' : 'team-b'"
-                      :disabled="gameState.phase !== 'playing' || !myTurn || hostOffline" @click="submitLine">
-                {{ myTurn ? '提交飞花（回车）' : '等待对方出牌...' }}
+                      :disabled="gameState.phase !== 'playing' || !myTurn || hostOffline || poetryBusy" @click="submitLine">
+                {{ poetryBusy ? '校验诗句中…' : myTurn ? '提交飞花（回车）' : '等待对方出牌...' }}
               </button>
               <button :disabled="gameState.phase !== 'playing' || !myTurn || hostOffline" @click="passTurn">放弃本回合</button>
             </div>
@@ -1193,6 +1221,7 @@ onMounted(() => window.addEventListener('resize', sizeCellFont))
                         <u v-if="seg.kind" class="mk" :class="'mk-' + seg.kind">{{ seg.text }}</u>
                         <template v-else>{{ seg.text }}</template>
                       </template>
+                      <span v-if="e.meta" class="src"> —— {{ e.meta }}</span>
                     </div>
                     <div class="meta">
                       第 {{ e.round }} 轮 · 命中 <b>{{ e.hits }}</b> 格 ｜
@@ -1383,6 +1412,7 @@ textarea.locked::placeholder{color:#6B7889;}
 .mk-hold{text-decoration-style:dotted;text-decoration-color:var(--hit-hold);}
 .loglist .meta{font-size:11.5px;color:var(--muted);margin-top:2px;}
 .loglist .meta em{font-style:normal;font-weight:700;}
+.loglist .line .src{color:#5B6B84;font-size:12px;margin-left:2px;}
 .em-a{color:var(--ink-a);}.em-b{color:var(--ink-b);}
 .empty{font-size:12.5px;color:var(--muted);text-align:center;padding:18px 0;}
 
