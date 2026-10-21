@@ -2,6 +2,7 @@
 import { ref, reactive, computed, onMounted, onBeforeUnmount, watch, nextTick } from 'vue'
 import { ensureAuth, rtdbGet, rtdbSet, rtdbPatch, rtdbRemove } from './api'
 import { POOL, POOL_SET, EXTRA, EXTRA_WT, EXTRA_FREQ } from './game/pools'
+import { exportShotPng, exportShotGif } from './game/exporter'
 
 /* ================= Firebase 连接状态（仅连接指示，游戏数据同步后续阶段接入） ================= */
 const fbStatus = ref('connecting') // connecting | ok | lost | error
@@ -439,6 +440,23 @@ function redrawBoard(seed = Math.floor(Math.random() * 2 ** 31)) {
   previewSet.value = new Set()
   changedNow.value = {}
 }
+
+/* ================= 导出（战报截图 / 逐手回放 GIF） ================= */
+function exportGameCtx() {
+  return {
+    side: gameState.side,
+    cells: gameState.side * gameState.side,
+    board: gameState.board,
+    log: gameState.log,
+    phase: gameState.phase,
+    totalRounds: gameState.totalRounds,
+    endless: gameState.endless,
+    round: currentRound.value,
+    hitKinds,
+  }
+}
+const onExportPng = () => exportShotPng(exportGameCtx(), flashTip)
+const onExportGif = () => exportShotGif(exportGameCtx(), flashTip)
 
 /* 出手前预览：输入句命中的格子刷成当前回合方的半透明色 */
 const poemInput = ref('')
@@ -994,7 +1012,7 @@ onMounted(() => window.addEventListener('resize', sizeCellFont))
       <h1>飞花斯普拉遁<span class="tag">主持台</span></h1>
       <div class="head-tools">
         <span class="conn" :class="fbStatus" :title="fbError || connText"><i></i>{{ connText }}</span>
-        <span style="color:#98a4b3;font-size:12px;margin-left:6px;font-weight:600">v2.2</span>
+        <span style="color:#98a4b3;font-size:12px;margin-left:6px;font-weight:600">v2.3</span>
         <span v-if="roomState === 'playing'" class="conn room">房间 {{ roomCode }}</span>
         <span v-if="roomState === 'playing'" class="conn room">你是{{ myTeam ? TEAM_NAME[myTeam] : '观战' }}</span>
         <template v-if="roomState === 'playing'">
@@ -1160,6 +1178,10 @@ onMounted(() => window.addEventListener('resize', sizeCellFont))
               </button>
               <button :disabled="gameState.phase !== 'playing' || !myTurn || hostOffline" @click="passTurn">放弃本回合</button>
             </div>
+            <div class="row" style="margin-top:10px">
+              <button @click="onExportPng" title="生成当前局面战报图（含棋盘与飞花记录）并下载">导出截图</button>
+              <button @click="onExportGif" title="生成逐手回放 GIF（从空盘到当前局面）并下载，记录越多耗时越久">导出 GIF</button>
+            </div>
             <label class="chk" style="margin-top:10px;display:flex">
               <input type="checkbox" v-model="allowDup" /> 允许重复句（默认拦截已出现过的句子）
             </label>
@@ -1245,10 +1267,13 @@ onMounted(() => window.addEventListener('resize', sizeCellFont))
 header.top{display:flex;align-items:flex-end;justify-content:space-between;gap:12px;flex-wrap:nowrap;margin-bottom:16px;}
 h1{font-size:22px;margin:0;letter-spacing:.5px;white-space:nowrap;flex:0 0 auto;}
 h1 .tag{font-size:12px;font-weight:600;vertical-align:middle;margin-left:8px;background:#E8EEF8;color:#2C4A78;border-radius:999px;padding:3px 9px;letter-spacing:0;}
-.head-tools{display:flex;gap:4px;align-items:center;flex-wrap:nowrap;justify-content:flex-end;min-width:0;}
+.head-tools{display:flex;gap:4px;align-items:center;flex-wrap:nowrap;justify-content:flex-end;min-width:0;overflow-x:auto;-webkit-overflow-scrolling:touch;scrollbar-width:thin;padding-bottom:4px;}
 .head-tools>*{flex:0 0 auto;}
+.head-tools::-webkit-scrollbar{height:6px;}
+.head-tools::-webkit-scrollbar-thumb{background:#C9D4E4;border-radius:3px;}
+.head-tools::-webkit-scrollbar-track{background:transparent;}
 header.top button{padding:7px 9px;white-space:nowrap;}
-@media (max-width:1159px){ header.top{flex-wrap:wrap;} }
+@media (max-width:1159px){ header.top{flex-wrap:wrap;} .head-tools{justify-content:flex-start;width:100%;} }
 
 /* 连接状态 chip */
 .conn{display:inline-flex;align-items:center;gap:6px;font-size:12px;border-radius:999px;padding:4px 10px;border:1px solid var(--line);background:#fff;color:var(--muted);}
