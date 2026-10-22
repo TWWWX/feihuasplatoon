@@ -294,7 +294,7 @@ function drawShotCell(ctx, g, cx, ry, w, e, team, G) {
     ctx.fillText('未涂色', cx + 2, ry + 39)
     return
   }
-  const fit = fitText(ctx, lineOf(e), w - 6, 18, 12, '600')
+  const fit = fitText(ctx, lineOf(e), w - 6, 18, 8, '600')
   drawHitMarks(ctx, g, e, fit.text, cx + 2, ry + 21, fit.px, '600', G)
   ctx.font = '600 ' + fit.px + 'px ' + SHOT_FONT
   ctx.fillStyle = G.text
