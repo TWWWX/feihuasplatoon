@@ -27,6 +27,16 @@ function tokenValid(token) {
   return !!token && tokenExp(token) > Date.now() / 1000 + 60
 }
 
+/* res.json() 的防崩封装：响应是网页（<!doctype…）或坏 JSON 时抛可读错误而非 SyntaxError */
+async function safeJson(res, label) {
+  const text = await res.text()
+  try {
+    return JSON.parse(text)
+  } catch {
+    throw new Error(label + '返回了网页而非数据，服务可能暂时不可用，请稍后重试')
+  }
+}
+
 /* 匿名注册：返回 { uid, idToken } */
 async function signUp() {
   const res = await fetch(`${PROXY}/v1/accounts:signUp?key=${API_KEY}`, {
@@ -35,7 +45,7 @@ async function signUp() {
     body: '{}',
   })
   if (!res.ok) throw new Error('匿名登录失败：HTTP ' + res.status)
-  const data = await res.json()
+  const data = await safeJson(res, '匿名登录')
   if (!data.idToken || !data.localId) throw new Error('匿名登录返回异常')
   cachedToken = data.idToken
   cachedUid = data.localId
@@ -55,7 +65,7 @@ async function refreshToken() {
     body: new URLSearchParams({ grant_type: 'refresh_token', refresh_token: rt }),
   })
   if (!res.ok) return null
-  const data = await res.json()
+  const data = await safeJson(res, '刷新令牌')
   /* STS 返回字段名与 signUp 不同：id_token / user_id / refresh_token */
   if (!data.id_token) return null
   cachedToken = data.id_token
@@ -101,7 +111,27 @@ async function authedRequest(method, path, body) {
     throw new Error(msg)
   }
   const text = await res.text()
-  return text ? JSON.parse(text) : null
+  /* Cloudflare 在 Functions 未命中/边缘瞬时故障时会回退返回 SPA 的 index.html（<!doctype …），
+     解析必然崩 SyntaxError。识别后自动重试一次；仍失败则抛可读错误 */
+  if (text[0] === '<') {
+    console.error(`[api] ${method} ${cleanPath} → 网页响应（应为 JSON），重试一次`)
+    res = await doFetch()
+    if (res.status === 401) {
+      const renewed = (await refreshToken().catch(() => null)) || (await signUp().catch(() => null))
+      if (renewed) res = await doFetch()
+    }
+    if (!res.ok) throw new Error('服务暂时不可用（HTTP ' + res.status + '），请稍后重试')
+    const text2 = await res.text()
+    if (text2[0] === '<') {
+      throw new Error('服务暂时不可用（返回了网页而非数据，可能部署正在更新），请稍后重试')
+    }
+    return text2 ? JSON.parse(text2) : null
+  }
+  try {
+    return text ? JSON.parse(text) : null
+  } catch (e) {
+    throw new Error('服务返回了无法解析的数据，请稍后重试')
+  }
 }
 
 export const rtdbGet = (path) => authedRequest('GET', path)
