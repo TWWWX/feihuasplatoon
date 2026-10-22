@@ -1,7 +1,7 @@
 <script setup>
 import { ref, reactive, computed, onMounted, onBeforeUnmount, watch, nextTick } from 'vue'
 import { ensureAuth, rtdbGet, rtdbSet, rtdbPatch, rtdbRemove } from './api'
-import { POOL, POOL_SET, EXTRA, EXTRA_WT, EXTRA_FREQ } from './game/pools'
+import { POOL_SET, EXTRA, EXTRA_WT, EXTRA_FREQ, POOL_GROUPS } from './game/pools'
 import { exportShotPng, exportShotGif } from './game/exporter'
 
 /* ================= Firebase 连接状态（仅连接指示，游戏数据同步后续阶段接入） ================= */
@@ -25,7 +25,7 @@ const lobbyStatusText = computed(
    rooms/{roomId} = {
      meta:   { hostUid, createdAt },
      players:{ red: { uid, name }, blue: { uid, name } },
-     state:  { seed, side, totalRounds, endless, board, currentTurn,
+     state:  { seed, side, totalRounds, endless, poolMask, board, currentTurn,
                round, redScore, blueScore, history, status, endReason }
    }
    本地用 A/B 表示赤/青，与云端 red/blue 在同步边界互转。 */
@@ -93,11 +93,12 @@ function seededShuffle(a, rng) {
   }
   return a
 }
-/* 额外字：按唐诗+宋词合计频次加权、不放回地抽 k 个（棋盘上同字只能一格） */
-function seededPickExtras(k, rng) {
+/* 额外字：按唐诗+宋词合计频次加权、不放回地抽 k 个（棋盘上同字只能一格，且避开基础字库） */
+function seededPickExtras(k, rng, excludeSet) {
   const idx = []
   const w = []
   for (let i = 0; i < EXTRA.length; i++) {
+    if (excludeSet && excludeSet.has(EXTRA[i])) continue
     idx.push(i)
     w.push(EXTRA_WT[i])
   }
@@ -121,12 +122,13 @@ function seededPickExtras(k, rng) {
   }
   return out
 }
-function buildBoard(seed, side, extraN) {
+function buildBoard(seed, side, extraN, poolChars) {
   const rng = mulberry32(seed)
   const total = side * side
-  const picked = seededShuffle(POOL.slice(), rng)
+  const poolSet = new Set(poolChars)
+  const picked = seededShuffle(poolChars.slice(), rng)
     .slice(0, total - extraN)
-    .concat(seededPickExtras(extraN, rng))
+    .concat(seededPickExtras(extraN, rng, poolSet))
   seededShuffle(picked, rng) /* 额外字与基础字混在一起铺，位置不带规律 */
   return picked.map((ch) => ({ ch, owner: null }))
 }
@@ -136,8 +138,9 @@ function localToCloudState() {
   return {
     seed: gameState.seed,
     side: gameState.side,
-    totalRounds: gameState.totalRounds,
-    endless: gameState.endless,
+    totalRounds: 0,
+    endless: true,
+    poolMask: (poolSel.value.tang ? 1 : 0) | (poolSel.value.song ? 2 : 0) | (poolSel.value.su ? 4 : 0) | (poolSel.value.xin ? 8 : 0),
     board: gameState.board.map((c) => ({
       ch: c.ch,
       owner: c.owner === 'A' ? 'red' : c.owner === 'B' ? 'blue' : null,
@@ -155,8 +158,9 @@ function cloudToLocalState(st) {
   return {
     seed: st.seed || 0,
     side: st.side || Math.round(Math.sqrt((st.board || []).length)) || 10,
-    totalRounds: st.totalRounds || 20,
-    endless: !!st.endless,
+    totalRounds: 0,
+    endless: true,
+    poolMask: typeof st.poolMask === 'number' ? st.poolMask : 15,
     board: (st.board || []).map((c) => ({
       ch: c.ch,
       owner: c.owner === 'red' ? 'A' : c.owner === 'blue' ? 'B' : null,
@@ -242,6 +246,7 @@ function applyRoomSnapshot(val) {
   gameState.side = local.side
   gameState.totalRounds = local.totalRounds
   gameState.endless = local.endless
+  applyPoolMask(local.poolMask)
   gameState.board = local.board
   gameState.turnNo = local.turnNo
   gameState.log = local.log
@@ -342,7 +347,6 @@ async function createRoom() {
     if (!code) throw new Error('房间码分配失败，请重试')
     /* 用当前顶栏设置初始化一局：seed → 棋盘 → 初始 state 写入云端 */
     gameState.side = clampSizeInput()
-    gameState.totalRounds = readRounds()
     redrawBoard()
     gameState.phase = 'ready'
     gameState.turnNo = 1
@@ -429,9 +433,6 @@ async function saveTeamName() {
   }
 }
 const TEAM_MARK = { A: '赤', B: '青' }
-/* 建议回合数：大致把棋盘涂到 4~5 成（10×10 → 20 轮、8×8 → 15 轮） */
-const SUGGEST_ROUNDS = { 5: 8, 6: 10, 7: 12, 8: 15, 9: 17, 10: 20, 11: 23, 12: 26, 13: 29, 14: 33, 15: 37, 16: 41, 17: 45, 18: 49, 19: 53, 20: 57 }
-const suggestRounds = (side) => SUGGEST_ROUNDS[side] || Math.max(8, Math.round((side * side) / 5))
 
 /* ================= 全局游戏状态 ================= */
 const gameState = reactive({
@@ -439,8 +440,8 @@ const gameState = reactive({
   side: 10,
   board: [], // [{ ch, owner: null | 'A' | 'B' }]
   phase: 'ready', // ready | playing | over
-  totalRounds: 20,
-  endless: false, // 战至最后一刻
+  totalRounds: 0, // 固定 0：战至最后一刻（保留字段兼容旧存档）
+  endless: true,
   turnNo: 1, // 1-based 总出手次数
   log: [], // 飞花 / 放弃记录
   undoStack: [],
@@ -449,12 +450,52 @@ const gameState = reactive({
 /* ---------- 顶栏设置 ---------- */
 const sizeInput = ref(10)
 const extraInput = ref(0)
-const roundInput = ref(suggestRounds(10))
-const endlessChk = ref(false)
 const fixMode = ref(false)
 const allowDup = ref(false)
 const keepPunct = ref(false)
-const roundAuto = ref(true) // 轮数是否仍跟随棋盘建议值（用户手动改过就置 false）
+
+/* ---------- 字库集合选择（开局前，房主设置，随 state.poolMask 同步双方） ---------- */
+const POOL_OPTIONS = [
+  { key: 'tang', label: '全唐诗 300' },
+  { key: 'song', label: '全宋词 300' },
+  { key: 'su', label: '苏轼 300' },
+  { key: 'xin', label: '辛弃疾 300' },
+]
+const poolSel = ref({ tang: true, song: true, su: true, xin: true }) // 默认全选
+const activePool = computed(() => {
+  const out = []
+  const seen = new Set()
+  for (const opt of POOL_OPTIONS) {
+    if (!poolSel.value[opt.key]) continue
+    for (const ch of POOL_GROUPS[opt.key]) {
+      if (!seen.has(ch)) {
+        seen.add(ch)
+        out.push(ch)
+      }
+    }
+  }
+  return out
+})
+const activePoolSet = computed(() => new Set(activePool.value))
+const extraAvail = computed(() => EXTRA.reduce((n, ch) => (activePoolSet.value.has(ch) ? n : n + 1), 0))
+function togglePool(key) {
+  if (gameState.phase !== 'ready') return
+  const remaining = POOL_OPTIONS.filter((o) => o.key !== key && poolSel.value[o.key]).length
+  if (poolSel.value[key] && remaining === 0) return // 至少保留一个字库
+  poolSel.value[key] = !poolSel.value[key]
+  redrawBoard()
+  syncState()
+}
+function selectAllPools() {
+  if (gameState.phase !== 'ready') return
+  poolSel.value = { tang: true, song: true, su: true, xin: true }
+  redrawBoard()
+  syncState()
+}
+function applyPoolMask(mask) {
+  const m = typeof mask === 'number' && mask >= 0 && mask <= 15 ? mask : 15
+  poolSel.value = { tang: !!(m & 1), song: !!(m & 2), su: !!(m & 4), xin: !!(m & 8) }
+}
 
 /* ---------- 派生状态 ---------- */
 const cellTotal = computed(() => gameState.side * gameState.side)
@@ -475,7 +516,7 @@ const currentRound = computed(() => {
     return Math.max(1, Math.ceil(moved / 2))
   }
   const r = Math.ceil(gameState.turnNo / 2)
-  return gameState.endless ? r : Math.min(gameState.totalRounds, r)
+  return r
 })
 const phaseText = computed(() => {
   if (gameState.phase === 'ready') return '待开局'
@@ -496,7 +537,8 @@ const poolOn = computed(() => {
   return m
 })
 const extraOnBoard = computed(() => {
-  const ex = gameState.board.filter((c) => !POOL_SET[c.ch]).map((c) => c.ch)
+  const sel = activePoolSet.value
+  const ex = gameState.board.filter((c) => !sel.has(c.ch)).map((c) => c.ch)
   ex.sort((x, y) => (EXTRA_FREQ[y] || 0) - (EXTRA_FREQ[x] || 0))
   return ex
 })
@@ -540,7 +582,7 @@ function redrawBoard(seed = Math.floor(Math.random() * 2 ** 31)) {
   const extraN = Math.max(0, Math.min(cap, parseInt(extraInput.value, 10) || 0))
   extraInput.value = extraN
   gameState.seed = seed
-  gameState.board = buildBoard(seed, gameState.side, extraN)
+  gameState.board = buildBoard(seed, gameState.side, extraN, activePool.value)
   previewSet.value = new Set()
   changedNow.value = {}
 }
@@ -553,8 +595,8 @@ function exportGameCtx() {
     board: gameState.board,
     log: gameState.log,
     phase: gameState.phase,
-    totalRounds: gameState.totalRounds,
-    endless: gameState.endless,
+    totalRounds: 0,
+    endless: true,
     round: currentRound.value,
     names: teamNames.value,
     hitKinds,
@@ -566,11 +608,11 @@ const onExportGif = () => exportShotGif(exportGameCtx(), flashTip)
 /* 出手前预览：输入句命中的格子刷成当前回合方的半透明色 */
 const poemInput = ref('')
 const previewSet = ref(new Set())
-/* 回合锁：未轮到自己 / 未开局 时锁定输入框（房主离线只标记不暂停，云端不依赖房主在线） */
-const poemLocked = computed(() => gameState.phase !== 'playing' || !myTurn.value)
+/* 输入锁定：仅未开局 / 已结束时锁（对局中对方回合也可打草稿，但提交按钮仍锁定） */
+const poemLocked = computed(() => gameState.phase !== 'playing')
 const poemPlaceholder = computed(() => {
   if (gameState.phase !== 'playing') return '点击上方「开始对战」后解锁'
-  if (!myTurn.value) return '等待对方出牌...'
+  if (!myTurn.value) return '可先打草稿，轮到你时提交'
   return '在此输入诗句，如：床前明月光，疑是地上霜（回车提交）'
 })
 function updatePreview() {
@@ -598,7 +640,7 @@ function colorToken(i) {
   const cell = gameState.board[i]
   if (!cell) return 'blank'
   const o = cell.owner
-  if (gameState.phase === 'playing' && previewSet.value.has(cell.ch)) {
+  if (gameState.phase === 'playing' && myTurn.value && previewSet.value.has(cell.ch)) {
     const t = currentTeam.value
     if (o === t) return 'own' + t
     return 'pv' + t + (o || 'N')
@@ -615,7 +657,7 @@ function cellClass(i) {
   const token = colorToken(i)
   const cls = ['cell']
   if (cell.owner) cls.push('own-' + cell.owner)
-  if (gameState.phase === 'playing' && previewSet.value.has(cell.ch)) {
+  if (gameState.phase === 'playing' && myTurn.value && previewSet.value.has(cell.ch)) {
     cls.push('pv-' + currentTeam.value)
     if (!cell.owner) cls.push('pv-new')
     else if (cell.owner !== currentTeam.value) cls.push('pv-cap')
@@ -799,15 +841,13 @@ async function submitLine() {
 function advance() {
   poemInput.value = ''
   updatePreview()
-  resetTimer()
   gameState.turnNo++
-  /* 棋盘填满：任何轮数模式都立即结算 */
+  /* 棋盘填满：立即结算 */
   if (score.value.n === 0) {
     finish('棋盘已填满')
     return
   }
-  if (!gameState.endless && gameState.turnNo > gameState.totalRounds * 2) finish()
-  else focusPoem()
+  focusPoem()
 }
 
 function passTurn() {
@@ -898,15 +938,6 @@ function again() {
 }
 
 /* ================= 设置项变更 ================= */
-function readRounds() {
-  gameState.endless = endlessChk.value
-  if (gameState.endless) return 0
-  let n = parseInt(roundInput.value, 10)
-  if (!isFinite(n)) n = 1
-  n = Math.max(1, Math.min(999, n))
-  roundInput.value = n
-  return n
-}
 function clampSizeInput() {
   let n = parseInt(sizeInput.value, 10)
   if (!isFinite(n)) n = gameState.side
@@ -919,8 +950,6 @@ function applySize() {
 }
 function redrawForSetup() {
   applySize()
-  if (roundAuto.value) roundInput.value = suggestRounds(gameState.side)
-  gameState.totalRounds = readRounds()
   gameState.phase = 'ready'
   gameState.turnNo = 1
   gameState.log = []
@@ -928,12 +957,10 @@ function redrawForSetup() {
   previewSet.value = new Set()
   changedNow.value = {}
   redrawBoard()
-  resetTimer()
   clearMsg()
 }
 function onRedraw() {
   if (gameState.phase === 'playing') return
-  gameState.totalRounds = readRounds()
   redrawForSetup()
   const k = extraOnBoard.value.length
   syncState()
@@ -941,7 +968,6 @@ function onRedraw() {
 }
 function startGame() {
   if (gameState.phase === 'playing') return
-  gameState.totalRounds = readRounds()
   /* 改了尺寸但没触发 change：先按新尺寸重铺，否则会拿旧棋盘开局 */
   const n = clampSizeInput()
   if (n !== gameState.side) {
@@ -953,11 +979,8 @@ function startGame() {
   gameState.log = []
   gameState.undoStack = []
   previewSet.value = new Set()
-  resetTimer()
   flashTip(
-    gameState.endless
-      ? '开局（战至最后一刻）！由 ' + teamNames.value.A + ' 先飞。棋盘填满或点「提前结算」时结算。'
-      : '开局！由 ' + teamNames.value.A + ' 先飞。每句必须至少用一个未涂色的命中格。',
+    '开局（战至最后一刻）！由 ' + teamNames.value.A + ' 先飞。棋盘填满或点「提前结算」时结算。',
     'ok'
   )
   focusPoem()
@@ -967,12 +990,10 @@ function onSizeChange() {
   const n = clampSizeInput()
   if (gameState.phase === 'playing') return /* 对局中改尺寸不生效，只影响下一局 */
   if (n === gameState.side) return
-  const roundWas = gameState.totalRounds
   redrawForSetup()
   const k = extraOnBoard.value.length
   flashTip(
-    `棋盘已改为 ${gameState.side}×${gameState.side}（${cellTotal.value} 格${k ? `，含额外字 ${k}` : ''}），已重铺。` +
-      (!gameState.endless && gameState.totalRounds !== roundWas ? `轮数按建议改为 ${gameState.totalRounds} 轮。` : ''),
+    `棋盘已改为 ${gameState.side}×${gameState.side}（${cellTotal.value} 格${k ? `，含额外字 ${k}` : ''}），已重铺。`,
     'ok'
   )
   syncState()
@@ -987,62 +1008,13 @@ function onExtraChange() {
   const k = parseInt(extraInput.value, 10) || 0
   redrawForSetup()
   syncState()
-  flashTip(k ? `已重铺棋盘：其中 ${k} 个额外字（按唐诗+宋词合计频次加权抽取）。` : '已重铺棋盘：关闭额外字，只用基础 600 字。', 'ok')
-}
-function onRoundChange() {
-  if (gameState.phase === 'playing') return
-  gameState.totalRounds = readRounds()
-  roundAuto.value = gameState.totalRounds === suggestRounds(gameState.side)
-  if (roundAuto.value) flashTip(`轮数已回到建议值 ${gameState.totalRounds} 轮，之后改棋盘尺寸会自动跟着调。`, 'ok')
-  syncState()
-}
-function onEndlessChange() {
-  if (gameState.phase === 'playing') return
-  readRounds()
-  flashTip(
-    gameState.endless
-      ? '已切到战至最后一刻：不限轮数，棋盘填满或点「提前结算」才结束。'
-      : `已回到有限轮数：${gameState.totalRounds} 轮。`,
-    'ok'
-  )
-  syncState()
+  flashTip(k ? `已重铺棋盘：其中 ${k} 个额外字（按唐诗+宋词合计频次加权抽取）。` : '已重铺棋盘：只用基础字库（当前勾选集合）。', 'ok')
 }
 function onFinish() {
   if (confirm('确认提前结算？')) {
     finish()
     syncState()
   }
-}
-
-/* ================= 计时器 ================= */
-const timerLeft = ref(30)
-const timerRun = ref(false)
-const timerSel = ref(30)
-let timerId = null
-function resetTimer() {
-  stopTimer()
-  timerLeft.value = parseInt(timerSel.value, 10) || 30
-}
-function startTimer() {
-  if (timerRun.value) {
-    stopTimer()
-    return
-  }
-  timerRun.value = true
-  timerId = setInterval(() => {
-    timerLeft.value--
-    if (timerLeft.value <= 0) {
-      timerLeft.value = 0
-      stopTimer()
-    }
-  }, 1000)
-}
-function stopTimer() {
-  if (timerId) {
-    clearInterval(timerId)
-    timerId = null
-  }
-  timerRun.value = false
 }
 
 /* ================= 输入框交互 ================= */
@@ -1095,12 +1067,9 @@ onMounted(async () => {
       sessionStorage.removeItem('fh_room')
     }
   }
-  roundInput.value = suggestRounds(gameState.side)
   redrawBoard()
-  resetTimer()
 })
 onBeforeUnmount(() => {
-  if (timerId) clearInterval(timerId)
   if (changedTimer) clearTimeout(changedTimer)
   window.removeEventListener('resize', sizeCellFont)
   stopPolling()
@@ -1111,10 +1080,10 @@ onMounted(() => window.addEventListener('resize', sizeCellFont))
 <template>
   <div class="wrap">
     <header class="top">
-      <h1>飞花斯普拉遁<span class="tag">主持台</span></h1>
+      <h1>飞花斯普拉遁</h1>
       <div class="head-tools">
         <span class="conn" :class="fbStatus" :title="fbError || connText"><i></i>{{ connText }}</span>
-        <span style="color:#98a4b3;font-size:12px;margin-left:6px;font-weight:600">v2.3</span>
+        <span style="color:#98a4b3;font-size:12px;margin-left:6px;font-weight:600">v2.4</span>
         <span v-if="roomState === 'playing'" class="conn room">房间 {{ roomCode }}</span>
         <span v-if="roomState === 'playing'" class="conn room">你是{{ myTeam ? teamNames[myTeam] : '观战' }}</span>
         <template v-if="roomState === 'playing'">
@@ -1122,27 +1091,23 @@ onMounted(() => window.addEventListener('resize', sizeCellFont))
             <input type="checkbox" v-model="fixMode" :disabled="!isHost" /> 修正模式
           </label>
           <label class="sizefield" :class="{ off: gameState.phase === 'playing' }"
-                 title="棋盘 N×N（5–20，上限受 600 字基础字库限制；改完自动重抽棋盘）">
+                 title="棋盘 N×N（5–20，改完自动重抽棋盘）">
             <input type="number" v-model.number="sizeInput" min="5" max="20" step="1" inputmode="numeric"
                    :disabled="gameState.phase === 'playing' || !isHost" @change="onSizeChange" />
             <span>× <b>{{ gameState.side }}</b> 格</span>
           </label>
           <label class="sizefield" :class="{ off: gameState.phase === 'playing' }"
-                 title="额外字：从额外字池（唐诗高频字，已并入基础库的字已剔除）按唐诗+宋词合计频次加权抽取 K 个放进棋盘（0 = 只用基础 600 字）">
-            <input type="number" v-model.number="extraInput" min="0" max="289" step="1" inputmode="numeric"
+                 title="额外字：从额外字池（自动避开已选基础字库）按唐诗+宋词合计频次加权抽取 K 个放进棋盘（0 = 只用基础字库）">
+            <input type="number" v-model.number="extraInput" min="0" max="400" step="1" inputmode="numeric"
                    :disabled="gameState.phase === 'playing' || !isHost" @change="onExtraChange" />
             <span>个额外字</span>
           </label>
-          <label class="sizefield" :class="{ off: gameState.phase === 'playing' || gameState.endless }"
-                 title="对战轮数（每轮双方各飞一句）；改棋盘尺寸时自动给建议值">
-            <input type="number" v-model.number="roundInput" min="1" max="999" step="1" inputmode="numeric"
-                   :disabled="gameState.phase === 'playing' || gameState.endless || !isHost" @change="onRoundChange" />
-            <span>轮</span>
-          </label>
-          <label class="chk" :class="{ off: gameState.phase === 'playing' }"
-                 title="战至最后一刻：不限轮数，直到棋盘填满或点「提前结算」才结算">
-            <input type="checkbox" v-model="endlessChk" :disabled="gameState.phase === 'playing' || !isHost" @change="onEndlessChange" /> 战至最后一刻
-          </label>
+          <div class="poolpick" :title="gameState.phase === 'ready' ? '勾选参与抽样的字库集合（并集去重）；随房间同步双方' : '仅待开局时可调整'">
+            <button v-for="opt in POOL_OPTIONS" :key="opt.key" :class="{ on: poolSel[opt.key] }"
+                    :disabled="gameState.phase !== 'ready' || !isHost" @click="togglePool(opt.key)">{{ opt.label }}</button>
+            <button class="primary" :disabled="gameState.phase !== 'ready' || !isHost"
+                    @click="selectAllPools" title="四个字库全部参与（默认）">全选</button>
+          </div>
           <button :disabled="gameState.phase === 'playing' || !isHost" @click="onRedraw">重抽棋盘</button>
           <button class="primary" :disabled="gameState.phase !== 'ready' || !isHost" @click="startGame">{{ startLabel }}</button>
           <button :disabled="!gameState.undoStack.length" @click="undo">撤销一步</button>
@@ -1189,7 +1154,7 @@ onMounted(() => window.addEventListener('resize', sizeCellFont))
         <div class="card">
           <div class="pad turnbar">
             <div class="roundinfo">
-              第 <b>{{ currentRound }}</b><template v-if="!gameState.endless"> / <b>{{ gameState.totalRounds }}</b></template> 轮<template v-if="gameState.endless"> · 战至最后一刻</template> · <span>{{ phaseText }}</span>
+              第 <b>{{ currentRound }}</b> 轮 · 战至最后一刻 · <span>{{ phaseText }}</span>
             </div>
             <div class="teams">
               <div class="team tA" :class="{ active: gameState.phase === 'playing' && currentTeam === 'A' }">
@@ -1223,21 +1188,22 @@ onMounted(() => window.addEventListener('resize', sizeCellFont))
           </div>
 
           <details>
-            <summary>字库（《全唐诗》字频前 300）</summary>
+            <summary>基础字库（{{ activePool.length }} 字 · 四库并集）</summary>
             <div class="detbody">
               <div class="poolgrid">
-                <span v-for="ch in POOL" :key="ch" :class="{ on: poolOn[ch] }">{{ ch }}</span>
+                <span v-for="ch in activePool" :key="ch" :class="{ on: poolOn[ch] }">{{ ch }}</span>
               </div>
+              <p class="poolnote">勾选的字库集合取并集去重后构成基础字库；对局中不可调整，房主可点顶栏按钮切换并自动重抽。</p>
             </div>
           </details>
           <details>
-            <summary>{{ extraOnBoard.length ? `额外字（本局 ${extraOnBoard.length} 个）` : `额外字（本局未启用 · 共 ${EXTRA.length} 字可选）` }}</summary>
+            <summary>{{ extraOnBoard.length ? `额外字（本局 ${extraOnBoard.length} 个）` : `额外字（本局未启用 · 共 ${extraAvail} 字可选）` }}</summary>
             <div class="detbody">
               <div class="poolgrid">
                 <span v-for="ch in extraOnBoard" :key="ch" class="on" :title="`唐诗+宋词出现 ${EXTRA_FREQ[ch] || 0} 次`">{{ ch }}</span>
               </div>
               <p v-if="!extraOnBoard.length" class="poolnote">
-                本局未启用额外字。在顶栏「额外字」填一个数字，就能让其中若干格改从<b>额外字池</b>里抽（按唐诗+宋词合计频次加权）。
+                本局未启用额外字。在顶栏「额外字」填一个数字，就能让其中若干格改从<b>额外字池</b>里抽（按唐诗+宋词合计频次加权，自动避开已选基础字库）。
               </p>
             </div>
           </details>
@@ -1245,10 +1211,10 @@ onMounted(() => window.addEventListener('resize', sizeCellFont))
             <summary>规则与判定逻辑</summary>
             <div class="detbody">
               <ol class="rules">
-                <li>棋盘：从基础字库（《全唐诗》字频前 300 + 《全宋词》高频前 300，共 600 字）中<b>随机抽 N×N 个不重复的字</b>铺成方阵（N 可在顶栏设 5–20）。顶栏「<b>额外字</b>」可指定其中 K 格改从<b>额外字池</b>（唐诗高频字，已并入基础库的字已剔除）里抽 —— 抽取<b>按唐诗与宋词合计频次加权</b>，越常见的字越容易被抽中。</li>
+                <li>棋盘：从<b>基础字库</b>（默认为「全唐诗 300 + 全宋词 300 + 苏轼 300 + 辛弃疾 300」四库并集去重，可在顶栏勾选参与集合）中<b>随机抽 N×N 个不重复的字</b>铺成方阵（N 可在顶栏设 5–20）。顶栏「<b>额外字</b>」可指定其中 K 格改从<b>额外字池</b>（自动避开已选基础字库）里抽 —— 抽取<b>按唐诗与宋词合计频次加权</b>，越常见的字越容易被抽中。</li>
                 <li>涂色：某人飞出一句后，<b>诗句中所有出现在棋盘上的字</b>，对应格子全部涂成该方颜色。</li>
                 <li>合法性：本句命中棋盘的字中，<b>至少要有 1 个格子当前未填色</b>；命中已涂色格可以抢夺。若命中格全都是已有颜色，本句无效。</li>
-                <li>胜负：满设定轮数（双方各飞相同句数）后结算，<b>己方颜色格子多者胜</b>；等同则平局。<b>棋盘提前被填满时立即结算</b>；选「<b>战至最后一刻</b>」时不限轮数，只有棋盘填满或点「提前结算」才结算。</li>
+                <li>胜负：本局为「<b>战至最后一刻</b>」模式——不限轮数，<b>棋盘填满</b>或点「<b>提前结算</b>」才结算，<b>己方颜色格子多者胜</b>；等同则平局。</li>
               </ol>
             </div>
           </details>
@@ -1273,20 +1239,6 @@ onMounted(() => window.addEventListener('resize', sizeCellFont))
                       :class="{ locked: poemLocked }" maxlength="50"
                       :placeholder="poemPlaceholder"
                       @input="onPoemInput" @mousedown="onPoemMousedown" @keydown="onPoemKeydown"></textarea>
-            <div class="timer">
-              <div class="clock" :class="{ run: timerRun, low: timerRun && timerLeft <= 10 }">{{ timerLeft }}</div>
-              <div class="row">
-                <button :disabled="gameState.phase !== 'playing'" @click="startTimer">{{ timerRun ? '暂停' : '开始计时' }}</button>
-                <button :disabled="gameState.phase !== 'playing'" @click="resetTimer">复位</button>
-                <select v-model.number="timerSel" @change="!timerRun && resetTimer()">
-                  <option :value="15">15 秒</option>
-                  <option :value="20">20 秒</option>
-                  <option :value="30">30 秒</option>
-                  <option :value="45">45 秒</option>
-                  <option :value="60">60 秒</option>
-                </select>
-              </div>
-            </div>
             <div class="row" style="margin-top:12px">
               <button class="primary submit" :class="currentTeam === 'A' ? 'team-a' : 'team-b'"
                       :disabled="gameState.phase !== 'playing' || !myTurn" @click="submitLine">
@@ -1425,6 +1377,11 @@ select,input[type=text],input[type=number]{font-family:inherit;font-size:13px;pa
 .sizefield{display:inline-flex;align-items:center;gap:5px;font-size:12px;color:var(--muted);}
 .sizefield input{width:50px;padding:7px 4px;text-align:center;font-variant-numeric:tabular-nums;}
 .sizefield b{color:var(--text);font-variant-numeric:tabular-nums;}
+.poolpick{display:inline-flex;align-items:center;gap:6px;flex-wrap:wrap;}
+.poolpick button{font-size:12px;padding:6px 10px;border-radius:9px;border:1px solid var(--line);background:transparent;color:var(--muted);cursor:pointer;}
+.poolpick button.on{background:var(--ink-a);border-color:var(--ink-a);color:#fff;font-weight:600;}
+.poolpick button.primary.on{background:var(--ink-b);border-color:var(--ink-b);}
+.poolpick button:disabled{opacity:.45;cursor:not-allowed;}
 input[type=number]:disabled,select:disabled{background:#F2F5FA;border-color:#E1E7F0;color:#7A8698;cursor:not-allowed;-webkit-text-fill-color:#7A8698;opacity:1;}
 .sizefield.off,.sizefield.off b,.chk.off{color:#7A8698;}
 .chk input:disabled{cursor:not-allowed;}
