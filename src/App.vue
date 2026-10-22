@@ -867,10 +867,6 @@ async function submitLine() {
     flashTip('请先输入诗句（仅中文汉字会被识别）。', 'err')
     return
   }
-  if (chars.length > 50) {
-    flashTip('诗句过长：最多 50 个汉字。', 'err')
-    return
-  }
   /* 转简体：棋盘与历史记录都是简体口径，匹配/查重统一用它 */
   const norm = await toSimplified(chars)
   const set = {}

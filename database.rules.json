@@ -97,13 +97,13 @@
                 ".validate": "newData.isNumber() && newData.val() >= 1 && newData.val() <= 999"
               },
               "line": {
-                ".validate": "!newData.exists() || (newData.isString() && newData.val().length <= 500)"
+                ".validate": "!newData.exists() || newData.isString()"
               },
               "norm": {
-                ".validate": "!newData.exists() || (newData.isString() && newData.val().length <= 500)"
+                ".validate": "!newData.exists() || newData.isString()"
               },
               "raw": {
-                ".validate": "!newData.exists() || (newData.isString() && newData.val().length <= 500)"
+                ".validate": "!newData.exists() || newData.isString()"
               },
               "hits": {
                 ".validate": "!newData.exists() || (newData.isNumber() && newData.val() >= 0 && newData.val() <= 1000)"
