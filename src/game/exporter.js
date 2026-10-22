@@ -373,7 +373,6 @@ function buildShotCanvas(g) {
   ctx.fillStyle = G.muted; ctx.font = '400 13px ' + SHOT_FONT
   ctx.fillText('生成时间 ' + d.getFullYear() + '-' + p2(d.getMonth() + 1) + '-' + p2(d.getDate()) +
     ' ' + p2(d.getHours()) + ':' + p2(d.getMinutes()), m.W - m.PAD, m.PAD + 18)
-  ctx.fillText('网址 https://feihuasplatoon.pages.dev/', m.W - m.PAD, m.PAD + 38)
   ctx.textAlign = 'left'
   ctx.fillStyle = G.muted; ctx.font = '400 13.5px ' + SHOT_FONT
   ctx.fillText(g.side + '×' + g.side + ' 棋盘 ｜ ' +
