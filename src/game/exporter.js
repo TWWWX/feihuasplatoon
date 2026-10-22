@@ -76,6 +76,30 @@ function fitText(ctx, text, maxW, maxPx, minPx, weight) {
   while (s.length > 1 && ctx.measureText(s + '…').width > maxW) s = s.slice(0, -1)
   return { text: s + '…', px: minPx }
 }
+/* 战报记录区专用：先缩字号，到下限仍超宽则换行（不截断、不加省略号），返回行数组 */
+function fitTextWrap(ctx, text, maxW, maxPx, minPx, weight) {
+  let px = maxPx
+  while (px > minPx) {
+    ctx.font = weight + ' ' + px + 'px ' + SHOT_FONT
+    if (ctx.measureText(text).width <= maxW) return { px, lines: [text] }
+    px -= 1
+  }
+  ctx.font = weight + ' ' + minPx + 'px ' + SHOT_FONT
+  const lines = []
+  let cur = ''
+  for (const ch of text) {
+    if (cur && ctx.measureText(cur + ch).width > maxW) { lines.push(cur); cur = ch }
+    else cur += ch
+  }
+  if (cur) lines.push(cur)
+  return { px: minPx, lines: lines.length ? lines : [''] }
+}
+/* 估算一整句在战报记录列里占几行（无需 canvas，供行高预算；宁可偏高也不遮挡） */
+function estimateLines(len, cellW) {
+  if (len <= 34) return 1            /* ≤34 字在缩字号后可单行放下 */
+  const perLine = Math.floor(cellW / 12.5)
+  return Math.max(2, Math.ceil(len / perLine))
+}
 /* 逐段换色写一行字：segs = [[文本, 颜色], ...] */
 function drawSegs(ctx, segs, x, y, px, weight) {
   ctx.font = weight + ' ' + px + 'px ' + SHOT_FONT
@@ -155,10 +179,18 @@ function shotMetrics(g) {
   const ROWH = 48, RECHEAD = 36
   const rows = rounds.length
   const headH = 84, gap = 26
-  const recH = rows ? RECHEAD + rows * ROWH : 46
+  /* 记录列单格文字宽（列宽 496 − 内边距 6）；超长句换行，行高按行数加高 */
+  const cellW = (W - PAD * 2 - 60 - 18 * 2) / 2 - 6
+  const lineLines = (e) => (e && e.type === 'fly' ? estimateLines(lineOf(e).length, cellW) : 1)
+  const roundHs = rounds.map((r) => {
+    const a = roundMap[r] && roundMap[r].A
+    const b = roundMap[r] && roundMap[r].B
+    return ROWH + (Math.max(lineLines(a), lineLines(b)) - 1) * 15
+  })
+  const recH = rows ? RECHEAD + roundHs.reduce((s, x) => s + x, 0) : 46
   const boardTop = PAD + headH + gap
   const H = boardTop + BW + gap + 30 + recH + PAD
-  return { W, PAD, CS, BW, headH, gap, recs, rounds, roundMap, rows, rowH: ROWH, recHeadH: RECHEAD, recH, boardTop, H }
+  return { W, PAD, CS, BW, headH, gap, recs, rounds, roundMap, rows, rowH: ROWH, roundHs, recHeadH: RECHEAD, recH, boardTop, H }
 }
 
 function drawShotBoard(ctx, g, x, y, m, G) {
@@ -279,7 +311,8 @@ function drawShotPanel(ctx, g, x, y, w, h, G) {
   ctx.fillText('每句须至少用 1 个未填色格；可命中并抢夺对方已涂格。', x + pad, y + 524)
 }
 
-/* 单格内容：一句飞花（或「放弃本回合」）；无记录时留占位短横 */
+/* 单格内容：一句飞花（或「放弃本回合」）；无记录时留占位短横。
+   超长句缩字号到下限后仍超宽则换行完整显示，键值行跟在最后一句诗行下方 */
 function drawShotCell(ctx, g, cx, ry, w, e, team, G) {
   const pc = team === 'A' ? G.inkA : G.inkB
   if (!e) {
@@ -294,17 +327,21 @@ function drawShotCell(ctx, g, cx, ry, w, e, team, G) {
     ctx.fillText('未涂色', cx + 2, ry + 39)
     return
   }
-  const fit = fitText(ctx, lineOf(e), w - 6, 18, 12, '600')
-  drawHitMarks(ctx, g, e, fit.text, cx + 2, ry + 21, fit.px, '600', G)
-  ctx.font = '600 ' + fit.px + 'px ' + SHOT_FONT
-  ctx.fillStyle = G.text
-  ctx.fillText(fit.text, cx + 2, ry + 21)
+  const fit = fitTextWrap(ctx, lineOf(e), w - 6, 18, 12, '600')
+  const LH = 15
+  fit.lines.forEach((ln, i) => {
+    const y = ry + 21 + i * LH
+    drawHitMarks(ctx, g, e, ln, cx + 2, y, fit.px, '600', G)
+    ctx.font = '600 ' + fit.px + 'px ' + SHOT_FONT
+    ctx.fillStyle = G.text
+    ctx.fillText(ln, cx + 2, y)
+  })
   drawSegs(ctx, [
     ['命中 ', G.muted], [String(e.hits), G.muted],
     [' · 新占 ', G.muted], [String(e.blank), pc],
     [' · 抢夺 ', G.muted], [String(e.capture), pc],
     [' · 己方 ', G.muted], [String(e.hold), G.muted],
-  ], cx + 2, ry + 39, 12, '400')
+  ], cx + 2, ry + 21 + (fit.lines.length - 1) * LH + 18, 12, '400')
 }
 
 function drawShotRecords(ctx, g, x, y, m, G) {
@@ -328,22 +365,25 @@ function drawShotRecords(ctx, g, x, y, m, G) {
   ctx.beginPath(); ctx.moveTo(x, y + 27.5); ctx.lineTo(x + bodyW, y + 27.5); ctx.stroke()
 
   const top = y + m.recHeadH
+  let ry = top
   m.rounds.forEach((r, ri) => {
-    const ry = top + ri * m.rowH
+    const rowH = m.roundHs ? m.roundHs[ri] : m.rowH
     if (ri % 2 === 1) {
       ctx.fillStyle = '#F7F9FC'
-      rrPath(ctx, x, ry - 3, bodyW, m.rowH - 2, 6); ctx.fill()
+      rrPath(ctx, x, ry - 3, bodyW, rowH - 2, 6); ctx.fill()
     }
+    /* 回合号（随行高垂直居中） */
     ctx.fillStyle = G.muted; ctx.font = '600 13px ' + SHOT_FONT
     ctx.textAlign = 'center'; ctx.textBaseline = 'middle'
-    ctx.fillText(String(r), x + roundW / 2, ry + 21)
+    ctx.fillText(String(r), x + roundW / 2, ry + rowH / 2)
     ctx.textAlign = 'left'; ctx.textBaseline = 'alphabetic'
 
     drawShotCell(ctx, g, xA, ry, colW, m.roundMap[r] && m.roundMap[r].A, 'A', G)
     drawShotCell(ctx, g, xB, ry, colW, m.roundMap[r] && m.roundMap[r].B, 'B', G)
 
     ctx.strokeStyle = '#EAEFF7'; ctx.lineWidth = 1
-    ctx.beginPath(); ctx.moveTo(x, ry + m.rowH - 2.5); ctx.lineTo(x + bodyW, ry + m.rowH - 2.5); ctx.stroke()
+    ctx.beginPath(); ctx.moveTo(x, ry + rowH - 2.5); ctx.lineTo(x + bodyW, ry + rowH - 2.5); ctx.stroke()
+    ry += rowH
   })
 }
 

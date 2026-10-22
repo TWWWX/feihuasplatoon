@@ -1344,7 +1344,7 @@ onMounted(() => window.addEventListener('resize', sizeCellFont))
               <button :disabled="gameState.phase !== 'playing' || !myTurn" @click="passTurn">放弃本回合</button>
             </div>
             <div class="row" style="margin-top:10px">
-              <button @click="onExportPng" title="生成当前局面战报图（含棋盘与飞花记录）并下载">导出截图</button>
+              <button @click="onExportPng" title="生成当前局面战报图（含棋盘与飞花记录）并下载 PNG 文件，与旧版「导出战报」一致">导出战报</button>
               <button @click="onExportGif" title="生成逐手回放 GIF（从空盘到当前局面）并下载，记录越多耗时越久">导出 GIF</button>
               <button v-if="canSwitchSide" @click="switchSide"
                       title="房间只有自己时可换到另一阵营（赤 ⇄ 青）；房主身份跟人走，不受影响">切换阵营</button>
