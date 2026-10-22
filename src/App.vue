@@ -266,7 +266,7 @@ function syncState() {
   )
 }
 
-/* ---- 房间维护（轮询时由在线方执行）：无主房间接管 / 房主离线 30 分钟转移。
+/* ---- 房间维护（轮询时由在线方执行）：无主房间接管 / 房主离线 3 分钟转移（与踢出/顶替阈值一致）。
    席位不再自动移除——离线满 3 分钟由新成员加入时顶替，或在席玩家手动踢出 ---- */
 let lastMaintainAt = 0
 async function maintainRoom(val) {
@@ -278,17 +278,17 @@ async function maintainRoom(val) {
   const mine = uid.value
   const hostUid = val.meta.hostUid
   if (!mine || (red !== mine && blue !== mine)) return
-  const fresh30 = (t) => typeof t === 'number' && Date.now() - t < 1800000
-  const redHere = !!red && (red === mine || fresh30(val.presence && val.presence.red))
-  const blueHere = !!blue && (blue === mine || fresh30(val.presence && val.presence.blue))
+  const fresh3 = (t) => typeof t === 'number' && Date.now() - t < 180000
+  const redHere = !!red && (red === mine || fresh3(val.presence && val.presence.red))
+  const blueHere = !!blue && (blue === mine || fresh3(val.presence && val.presence.blue))
   const hostSeatGone = hostUid !== red && hostUid !== blue
   const hostSeatStale = (hostUid === red && !redHere) || (hostUid === blue && !blueHere)
-  /* 房主缺席（席位被顶替/踢出后残留 / 房主离线超 30 分钟）→ 我作为在席成员接管 */
+  /* 房主缺席（席位被顶替/踢出后残留 / 房主离线超 3 分钟）→ 我作为在席成员接管 */
   if (hostUid !== mine && (hostSeatGone || hostSeatStale)) {
     try {
       await rtdbPatch(`rooms/${roomCode.value}/meta`, { hostUid: mine })
       lastMaintainAt = Date.now()
-      flashTip(hostSeatGone ? '房间无主，你已成为房主。' : '房主离线超过 30 分钟，你已接管房间。', 'ok')
+      flashTip(hostSeatGone ? '房间无主，你已成为房主。' : '房主离线超过 3 分钟，你已接管房间。', 'ok')
     } catch (e) {
       lastMaintainAt = Date.now() /* 失败冷却 30s，避免每秒重试 */
       console.error('[maintain]', e && e.message)
@@ -1237,9 +1237,6 @@ onMounted(() => window.addEventListener('resize', sizeCellFont))
 
     <!-- ========== 游戏主界面 ========== -->
     <div v-else class="layout">
-      <div v-if="peerOffline" class="banner">
-        对方已离线（超过 6 秒）—— 对战不会暂停，可直接继续提交。对方离线满 3 分钟可踢出（在对方队名处）或被新成员顶替。
-      </div>
       <!-- 左：棋盘 -->
       <div class="side">
         <div class="card">
@@ -1314,6 +1311,7 @@ onMounted(() => window.addEventListener('resize', sizeCellFont))
                 <li>涂色：某人飞出一句后，<b>诗句中所有出现在棋盘上的字</b>，对应格子全部涂成该方颜色。</li>
                 <li>合法性：本句命中棋盘的字中，<b>至少要有 1 个格子当前未填色</b>；命中已涂色格可以抢夺。若命中格全都是已有颜色，本句无效。</li>
                 <li>胜负：本局为「<b>战至最后一刻</b>」模式——不限轮数，<b>棋盘填满</b>或点「<b>提前结算</b>」才结算，<b>己方颜色格子多者胜</b>；等同则平局。</li>
+                <li>离线：对方 <b>6 秒</b>无心跳即在队名处显示「离线」，对战<b>不会暂停</b>，可直接继续提交；对方离线满 <b>3 分钟</b>，队名处出现「踢出」按钮（移出后对方回大厅），新成员加入时也可<b>顶替</b>其席位（双方离线时优先顶替离线更久者）；房主离线满 3 分钟，在席成员自动接管房主。双方都不在线满 24 小时的房间会被定时清理。</li>
               </ol>
             </div>
           </details>
@@ -1335,7 +1333,7 @@ onMounted(() => window.addEventListener('resize', sizeCellFont))
             </div>
             <p class="sec-title">录入诗句</p>
             <textarea ref="poemEl" v-model="poemInput" :readonly="poemLocked"
-                      :class="{ locked: poemLocked }" maxlength="50"
+                      :class="{ locked: poemLocked }"
                       :placeholder="poemPlaceholder"
                       @input="onPoemInput" @mousedown="onPoemMousedown" @keydown="onPoemKeydown"></textarea>
             <div class="row" style="margin-top:12px">
@@ -1511,12 +1509,10 @@ input[type=number]:disabled,select:disabled{background:#F2F5FA;border-color:#E1E
 .offbadge{display:inline-block;margin-left:6px;font-size:11px;font-weight:600;color:#B4433A;background:#FBEDEC;border:1px solid #F0C7C4;border-radius:999px;padding:1px 8px;vertical-align:1px;}
 button.offbadge{cursor:pointer;font-family:inherit;line-height:1.5;}
 button.offbadge:hover{background:#F6D9D6;}
-.banner button{margin-left:10px;padding:5px 12px;font-size:12px;}
 
 /* ---------- layout ---------- */
 .layout{display:grid;grid-template-columns:minmax(0,1fr) 396px;gap:18px;align-items:start;}
 @media (max-width:1080px){.layout{grid-template-columns:1fr;}}
-.banner{grid-column:1/-1;background:#FFF6E6;border:1px solid #F4DEB2;color:#8A5A0B;border-radius:12px;padding:10px 16px;font-size:13px;font-weight:600;}
 .card{background:var(--card);border:1px solid var(--line);border-radius:var(--radius);box-shadow:var(--shadow);}
 .card .pad{padding:14px 16px;}
 
