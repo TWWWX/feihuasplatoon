@@ -57,7 +57,7 @@
             ".validate": "newData.isBoolean()"
           },
           "poolMask": {
-            ".validate": "!newData.exists() || (newData.isNumber() && newData.val() >= 0 && newData.val() <= 15)"
+            ".validate": "!newData.exists() || (newData.isNumber() && newData.val() >= 0 && newData.val() <= 31)"
           },
           "board": {
             ".validate": "newData.hasChildren()",

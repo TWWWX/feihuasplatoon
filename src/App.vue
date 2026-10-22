@@ -143,7 +143,7 @@ function localToCloudState() {
     side: gameState.side,
     totalRounds: 0,
     endless: true,
-    poolMask: (poolSel.value.tang ? 1 : 0) | (poolSel.value.song ? 2 : 0) | (poolSel.value.su ? 4 : 0) | (poolSel.value.xin ? 8 : 0),
+    poolMask: (poolSel.value.tang ? 1 : 0) | (poolSel.value.song ? 2 : 0) | (poolSel.value.su ? 4 : 0) | (poolSel.value.xin ? 8 : 0) | (poolSel.value.songx ? 16 : 0),
     board: gameState.board.map((c) => ({
       ch: c.ch,
       owner: c.owner === 'A' ? 'red' : c.owner === 'B' ? 'blue' : null,
@@ -163,7 +163,7 @@ function cloudToLocalState(st) {
     side: st.side || Math.round(Math.sqrt((st.board || []).length)) || 10,
     totalRounds: 0,
     endless: true,
-    poolMask: typeof st.poolMask === 'number' ? st.poolMask : 15,
+    poolMask: typeof st.poolMask === 'number' ? st.poolMask : 31,
     board: (st.board || []).map((c) => ({
       ch: c.ch,
       owner: c.owner === 'red' ? 'A' : c.owner === 'blue' ? 'B' : null,
@@ -544,10 +544,11 @@ const keepPunct = ref(false)
 const POOL_OPTIONS = [
   { key: 'tang', label: '全唐诗 300' },
   { key: 'song', label: '全宋词 300' },
+  { key: 'songx', label: '宋词 300（不含唐诗字）' },
   { key: 'su', label: '苏轼 300' },
   { key: 'xin', label: '辛弃疾 300' },
 ]
-const poolSel = ref({ tang: true, song: true, su: true, xin: true }) // 默认全选
+const poolSel = ref({ tang: true, song: true, songx: true, su: true, xin: true }) // 默认全选
 const activePool = computed(() => {
   const out = []
   const seen = new Set()
@@ -574,13 +575,14 @@ function togglePool(key) {
 }
 function selectAllPools() {
   if (gameState.phase !== 'ready') return
-  poolSel.value = { tang: true, song: true, su: true, xin: true }
+  poolSel.value = { tang: true, song: true, songx: true, su: true, xin: true }
   redrawBoard()
   syncState()
 }
 function applyPoolMask(mask) {
-  const m = typeof mask === 'number' && mask >= 0 && mask <= 15 ? mask : 15
-  poolSel.value = { tang: !!(m & 1), song: !!(m & 2), su: !!(m & 4), xin: !!(m & 8) }
+  /* 按位解析：tang=1 song=2 su=4 xin=8 songx=16；旧对局(0-15)无 songx 位，解析为未勾，可手动补选 */
+  const m = typeof mask === 'number' && mask >= 0 && mask <= 31 ? mask : 31
+  poolSel.value = { tang: !!(m & 1), song: !!(m & 2), songx: !!(m & 16), su: !!(m & 4), xin: !!(m & 8) }
 }
 
 /* ---------- 派生状态 ---------- */
