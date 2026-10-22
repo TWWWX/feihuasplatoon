@@ -144,7 +144,7 @@ function localToCloudState() {
     side: gameState.side,
     totalRounds: 0,
     endless: true,
-    poolMask: (poolSel.value.tang ? 1 : 0) | (poolSel.value.song ? 2 : 0) | (poolSel.value.su ? 4 : 0) | (poolSel.value.xin ? 8 : 0) | (poolSel.value.songx ? 16 : 0),
+    poolMask: (poolSel.value.tang ? 1 : 0) | (poolSel.value.song ? 2 : 0) | (poolSel.value.su ? 4 : 0) | (poolSel.value.xin ? 8 : 0) | (poolSel.value.songx ? 16 : 0) | (poolSel.value.su2 ? 32 : 0) | (poolSel.value.xin2 ? 64 : 0),
     board: gameState.board.map((c) => ({
       ch: c.ch,
       owner: c.owner === 'A' ? 'red' : c.owner === 'B' ? 'blue' : null,
@@ -164,7 +164,7 @@ function cloudToLocalState(st) {
     side: st.side || Math.round(Math.sqrt((st.board || []).length)) || 10,
     totalRounds: 0,
     endless: true,
-    poolMask: typeof st.poolMask === 'number' ? st.poolMask : 31,
+    poolMask: typeof st.poolMask === 'number' ? st.poolMask : 127,
     board: (st.board || []).map((c) => ({
       ch: c.ch,
       owner: c.owner === 'red' ? 'A' : c.owner === 'blue' ? 'B' : null,
@@ -547,9 +547,11 @@ const POOL_OPTIONS = [
   { key: 'song', label: '全宋词 300' },
   { key: 'songx', label: '宋词 300（不含唐诗字）' },
   { key: 'su', label: '苏轼 300' },
+  { key: 'su2', label: '苏轼 301–600' },
   { key: 'xin', label: '辛弃疾 300' },
+  { key: 'xin2', label: '辛弃疾 301–600' },
 ]
-const poolSel = ref({ tang: true, song: true, songx: true, su: true, xin: true }) // 默认全选
+const poolSel = ref({ tang: true, song: true, songx: true, su: true, su2: true, xin: true, xin2: true }) // 默认全选
 const activePool = computed(() => {
   const out = []
   const seen = new Set()
@@ -576,14 +578,22 @@ function togglePool(key) {
 }
 function selectAllPools() {
   if (gameState.phase !== 'ready') return
-  poolSel.value = { tang: true, song: true, songx: true, su: true, xin: true }
+  poolSel.value = { tang: true, song: true, songx: true, su: true, su2: true, xin: true, xin2: true }
   redrawBoard()
   syncState()
 }
 function applyPoolMask(mask) {
-  /* 按位解析：tang=1 song=2 su=4 xin=8 songx=16；旧对局(0-15)无 songx 位，解析为未勾，可手动补选 */
-  const m = typeof mask === 'number' && mask >= 0 && mask <= 31 ? mask : 31
-  poolSel.value = { tang: !!(m & 1), song: !!(m & 2), songx: !!(m & 16), su: !!(m & 4), xin: !!(m & 8) }
+  /* 按位解析：tang=1 song=2 su=4 xin=8 songx=16 su2=32 xin2=64；旧对局(0-15)无新位，解析为未勾，可手动补选 */
+  const m = typeof mask === 'number' && mask >= 0 && mask <= 127 ? mask : 127
+  poolSel.value = {
+    tang: !!(m & 1),
+    song: !!(m & 2),
+    su: !!(m & 4),
+    xin: !!(m & 8),
+    songx: !!(m & 16),
+    su2: !!(m & 32),
+    xin2: !!(m & 64),
+  }
 }
 
 /* ---------- 派生状态 ---------- */
@@ -1187,7 +1197,7 @@ onMounted(() => window.addEventListener('resize', sizeCellFont))
           </label>
           <label class="sizefield" :class="{ off: gameState.phase === 'playing' }"
                  title="额外字：从额外字池（自动避开已选基础字库）按唐诗+宋词合计频次加权抽取 K 个放进棋盘（0 = 只用基础字库）">
-            <input type="number" v-model.number="extraInput" min="0" max="400" step="1" inputmode="numeric"
+            <input type="number" v-model.number="extraInput" min="0" step="1" inputmode="numeric"
                    :disabled="gameState.phase === 'playing' || !isHost" @change="onExtraChange" />
             <span>个额外字</span>
           </label>
@@ -1271,13 +1281,13 @@ onMounted(() => window.addEventListener('resize', sizeCellFont))
           </div>
 
           <details>
-            <summary>基础字库（{{ activePool.length }} 字 · 五库并集）</summary>
+            <summary>基础字库（{{ activePool.length }} 字 · 七库并集）</summary>
             <div class="detbody">
               <div class="poolpick" :title="gameState.phase === 'ready' ? '勾选参与抽样的字库集合（并集去重）；随房间同步双方' : '仅待开局时可调整'">
                 <button v-for="opt in POOL_OPTIONS" :key="opt.key" :class="{ on: poolSel[opt.key] }"
                         :disabled="gameState.phase !== 'ready' || !isHost" @click="togglePool(opt.key)">{{ opt.label }}</button>
                 <button class="primary" :disabled="gameState.phase !== 'ready' || !isHost"
-                        @click="selectAllPools" title="五个字库全部参与（默认）">全选</button>
+                        @click="selectAllPools" title="七个字库全部参与（默认）">全选</button>
               </div>
               <div class="poolgrid">
                 <span v-for="ch in activePool" :key="ch" :class="{ on: poolOn[ch] }">{{ ch }}</span>
@@ -1300,7 +1310,7 @@ onMounted(() => window.addEventListener('resize', sizeCellFont))
             <summary>规则与判定逻辑</summary>
             <div class="detbody">
               <ol class="rules">
-                <li>棋盘：从<b>基础字库</b>（默认为「全唐诗 300 + 全宋词 300 + 宋词 300·不含唐诗字 + 苏轼 300 + 辛弃疾 300」五库并集去重，可在「基础字库」面板勾选参与集合）中<b>随机抽 N×N 个不重复的字</b>铺成方阵（N 可在顶栏设 5–20）。顶栏「<b>额外字</b>」可指定其中 K 格改从<b>额外字池</b>（自动避开已选基础字库）里抽 —— 抽取<b>按唐诗与宋词合计频次加权</b>，越常见的字越容易被抽中。</li>
+                <li>棋盘：从<b>基础字库</b>（默认为「全唐诗 300 + 全宋词 300 + 宋词 300·不含唐诗字 + 苏轼 300 + 苏轼 301–600 + 辛弃疾 300 + 辛弃疾 301–600」七库并集去重，可在「基础字库」面板勾选参与集合）中<b>随机抽 N×N 个不重复的字</b>铺成方阵（N 可在顶栏设 5–20）。顶栏「<b>额外字</b>」可指定其中 K 格改从<b>额外字池</b>（自动避开已选基础字库）里抽 —— 抽取<b>按唐诗与宋词合计频次加权</b>，越常见的字越容易被抽中。</li>
                 <li>涂色：某人飞出一句后，<b>诗句中所有出现在棋盘上的字</b>，对应格子全部涂成该方颜色。</li>
                 <li>合法性：本句命中棋盘的字中，<b>至少要有 1 个格子当前未填色</b>；命中已涂色格可以抢夺。若命中格全都是已有颜色，本句无效。</li>
                 <li>胜负：本局为「<b>战至最后一刻</b>」模式——不限轮数，<b>棋盘填满</b>或点「<b>提前结算</b>」才结算，<b>己方颜色格子多者胜</b>；等同则平局。</li>
