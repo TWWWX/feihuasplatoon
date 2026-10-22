@@ -47,8 +47,9 @@ const isHost = computed(() => roomMeta.value?.hostUid === uid.value)
    对方离线只做「标记」，不暂停对战：对方离线时仍可正常提交（云端不依赖对方在线）。 */
 const redOnline = ref(true)
 const blueOnline = ref(true)
+const peerKickable = ref(false) /* 对方离线满 3 分钟：徽标变踢出按钮 */
 const gotRoomSnapshot = ref(false)
-/* 对方席位离线（超 6 秒无心跳）：显示横幅与徽标；3 分钟可手动移出，30 分钟由轮询自动下位/接管 */
+/* 对方席位离线（超 6 秒无心跳）：显示横幅与徽标；满 3 分钟徽标变踢出按钮，也可被新成员顶替 */
 const peerOffline = computed(
   () =>
     roomState.value === 'playing' &&
@@ -208,10 +209,22 @@ function startPolling(code) {
     const seats = val.players || {}
     const mySeat = seats.red && seats.red.uid === uid.value ? 'red' : seats.blue && seats.blue.uid === uid.value ? 'blue' : null
     if (mySeat) rtdbSet(`rooms/${code}/presence/${mySeat}`, Date.now()).catch(() => {})
-    /* 离线判定：席位为空或心跳 6 秒内更新视为在线 */
-    const freshTs = (t) => typeof t === 'number' && Date.now() - t < 6000
+    /* 离线判定：席位为空或心跳 6 秒内更新视为在线；离线满 3 分钟可踢出/顶替 */
+    const now = Date.now()
+    const freshTs = (t) => typeof t === 'number' && now - t < 6000
     redOnline.value = !seats.red || seats.red.uid === uid.value || freshTs(val.presence && val.presence.red)
     blueOnline.value = !seats.blue || seats.blue.uid === uid.value || freshTs(val.presence && val.presence.blue)
+    peerKickable.value =
+      !!myTeam.value &&
+      !!gotRoomSnapshot.value &&
+      ((myTeam.value === 'A' &&
+        !!seats.blue &&
+        seats.blue.uid !== uid.value &&
+        (!(val.presence && typeof val.presence.blue === 'number') || now - val.presence.blue > 180000)) ||
+        (myTeam.value === 'B' &&
+          !!seats.red &&
+          seats.red.uid !== uid.value &&
+          (!(val.presence && typeof val.presence.red === 'number') || now - val.presence.red > 180000)))
     maintainRoom(val)
     /* presence 变化不触发界面刷新，只比对 meta/players/state */
     const json = JSON.stringify([val.meta, val.players, val.state])
@@ -253,7 +266,8 @@ function syncState() {
   )
 }
 
-/* ---- 房间维护（轮询时由在线方执行）：无主房间接管 / 房主离线 30 分钟转移 / 对方离线 30 分钟自动下位 ---- */
+/* ---- 房间维护（轮询时由在线方执行）：无主房间接管 / 房主离线 30 分钟转移。
+   席位不再自动移除——离线满 3 分钟由新成员加入时顶替，或在席玩家手动踢出 ---- */
 let lastMaintainAt = 0
 async function maintainRoom(val) {
   if (!val || !val.meta || !roomCode.value) return
@@ -269,29 +283,16 @@ async function maintainRoom(val) {
   const blueHere = !!blue && (blue === mine || fresh30(val.presence && val.presence.blue))
   const hostSeatGone = hostUid !== red && hostUid !== blue
   const hostSeatStale = (hostUid === red && !redHere) || (hostUid === blue && !blueHere)
-  let acted = false
-  try {
-    /* 房主缺席（席位转移后残留 / 房主离线超 30 分钟）→ 我作为在席成员接管 */
-    if (hostUid !== mine && (hostSeatGone || hostSeatStale)) {
+  /* 房主缺席（席位被顶替/踢出后残留 / 房主离线超 30 分钟）→ 我作为在席成员接管 */
+  if (hostUid !== mine && (hostSeatGone || hostSeatStale)) {
+    try {
       await rtdbPatch(`rooms/${roomCode.value}/meta`, { hostUid: mine })
-      acted = true
+      lastMaintainAt = Date.now()
       flashTip(hostSeatGone ? '房间无主，你已成为房主。' : '房主离线超过 30 分钟，你已接管房间。', 'ok')
+    } catch (e) {
+      lastMaintainAt = Date.now() /* 失败冷却 30s，避免每秒重试 */
+      console.error('[maintain]', e && e.message)
     }
-    /* 对方席位有人但心跳超 30 分钟 → 自动下位，空出席位给新人 */
-    if (blue === mine && red && !redHere) {
-      await rtdbRemove(`rooms/${roomCode.value}/players/red`)
-      acted = true
-      flashTip('赤营离线超过 30 分钟，已自动释放红方席位。', 'warn')
-    }
-    if (red === mine && blue && !blueHere) {
-      await rtdbRemove(`rooms/${roomCode.value}/players/blue`)
-      acted = true
-      flashTip('青营离线超过 30 分钟，已自动释放席位。', 'warn')
-    }
-    if (acted) lastMaintainAt = Date.now()
-  } catch (e) {
-    lastMaintainAt = Date.now() /* 失败冷却 30s，避免每秒重试 */
-    console.error('[maintain]', e && e.message)
   }
 }
 
@@ -349,6 +350,7 @@ async function exitRoom(reason) {
   roomMeta.value = null
   redOnline.value = true
   blueOnline.value = true
+  peerKickable.value = false
   gotRoomSnapshot.value = false
   roomState.value = 'lobby'
   if (reason === 'kicked') lobbyMsg.value = { text: '你已被房主移出房间。', kind: 'warn' }
@@ -453,36 +455,35 @@ async function joinRoom() {
       forgetRoom(code)
       throw new Error('房间不存在（可能已解散），已从最近列表移除')
     }
-    /* 成员可直接读 players：自己 uid 已在席位（刷新重连 / 换设备回来的房主）→ 直接恢复，不再受满员影响 */
-    let restored = false
-    try {
-      const pl = await rtdbGet(`rooms/${code}/players`)
-      if (pl && ((pl.red && pl.red.uid === uid.value) || (pl.blue && pl.blue.uid === uid.value))) {
-        restored = true
+    /* 房间内容对登录用户可读：自己 uid 已在席位（刷新重连 / 换设备回来的房主）→ 直接恢复 */
+    const pl = (await rtdbGet(`rooms/${code}/players`)) || {}
+    if (!((pl.red && pl.red.uid === uid.value) || (pl.blue && pl.blue.uid === uid.value))) {
+      /* 选席位：空席优先；两席都空进青营；被占席仅在原占者离线超 3 分钟时可顶替，
+         两席都可顶替时选离线时间更长者（presence 缺失视为离线最久） */
+      const pr = (await rtdbGet(`rooms/${code}/presence`)) || {}
+      const awayMs = (seat) => {
+        const uid0 = pl[seat] && pl[seat].uid
+        if (!uid0) return 0 /* 空席 */
+        const ts = pr[seat]
+        return typeof ts === 'number' ? Date.now() - ts : Infinity /* 心跳缺失视为离线最久 */
       }
-    } catch {} /* 非成员无读权限 → 走占位流程 */
-    if (!restored) {
-      /* 占位：先试青营（空位首写 / 自己 uid 幂等覆盖），满员再试赤营空位 */
-      let seated = false
-      try {
-        await rtdbPatch(`rooms/${code}/players/blue`, { uid: uid.value, name: '青营' })
-        seated = true
-      } catch (e) {
-        console.error('[join] PATCH players/blue 被拒：', e && e.message)
+      const away3 = (seat) => !!(pl[seat] && pl[seat].uid) && awayMs(seat) > 180000
+      const empty = (seat) => !pl[seat] || !pl[seat].uid
+      let target = null
+      if (empty('blue') && empty('red')) target = 'blue'
+      else if (empty('blue')) target = 'blue'
+      else if (empty('red')) target = 'red'
+      else if (away3('blue') && away3('red')) target = awayMs('red') > awayMs('blue') ? 'red' : 'blue'
+      else if (away3('blue')) target = 'blue'
+      else if (away3('red')) target = 'red'
+      if (!target) {
+        throw new Error('房间已满（赤青两营均有玩家且都在线）。若一方离线超过 3 分钟，可顶替其席位加入。')
       }
-      if (!seated) {
-        try {
-          await rtdbPatch(`rooms/${code}/players/red`, { uid: uid.value, name: '赤营' })
-          seated = true
-        } catch (e) {
-          console.error('[join] PATCH players/red 被拒：', e && e.message)
-        }
-      }
-      if (!seated) {
-        throw new Error('房间已满（赤青两营均有玩家）。对方离线满 3 分钟可由在席玩家手动移出，满 30 分钟自动释放。')
-      }
+      const replacing = !empty(target)
+      await rtdbPatch(`rooms/${code}/players/${target}`, { uid: uid.value, name: target === 'red' ? '赤营' : '青营' })
+      if (replacing) flashTip(`原${target === 'red' ? '赤营' : '青营'}离线超过 3 分钟，你已顶替其席位。`, 'ok')
     }
-    /* 房主重连、已在席位恢复、或占位成功，都直接进入 */
+    /* 房主重连、已在席位恢复、或占位/顶替成功，都直接进入 */
     lobbyMsg.value = null
     enterRoom(code, meta.hostUid === uid.value)
   } catch (e) {
@@ -1190,12 +1191,6 @@ onMounted(() => window.addEventListener('resize', sizeCellFont))
                    :disabled="gameState.phase === 'playing' || !isHost" @change="onExtraChange" />
             <span>个额外字</span>
           </label>
-          <div class="poolpick" :title="gameState.phase === 'ready' ? '勾选参与抽样的字库集合（并集去重）；随房间同步双方' : '仅待开局时可调整'">
-            <button v-for="opt in POOL_OPTIONS" :key="opt.key" :class="{ on: poolSel[opt.key] }"
-                    :disabled="gameState.phase !== 'ready' || !isHost" @click="togglePool(opt.key)">{{ opt.label }}</button>
-            <button class="primary" :disabled="gameState.phase !== 'ready' || !isHost"
-                    @click="selectAllPools" title="四个字库全部参与（默认）">全选</button>
-          </div>
           <button :disabled="gameState.phase === 'playing' || !isHost" @click="onRedraw">重抽棋盘</button>
           <button class="primary" :disabled="gameState.phase !== 'ready' || !isHost" @click="startGame">{{ startLabel }}</button>
           <button :disabled="!gameState.undoStack.length" @click="undo">撤销一步</button>
@@ -1233,8 +1228,7 @@ onMounted(() => window.addEventListener('resize', sizeCellFont))
     <!-- ========== 游戏主界面 ========== -->
     <div v-else class="layout">
       <div v-if="peerOffline" class="banner">
-        对方已离线（超过 6 秒）—— 对战不会暂停，可直接继续提交。对方离线满 3 分钟可手动移出，满 30 分钟自动释放席位。
-        <button @click="kickPeer" title="手动移出对方（需对方离线超过 3 分钟）；对方会被带回大厅">移出对方</button>
+        对方已离线（超过 6 秒）—— 对战不会暂停，可直接继续提交。对方离线满 3 分钟可踢出（在对方队名处）或被新成员顶替。
       </div>
       <!-- 左：棋盘 -->
       <div class="side">
@@ -1246,11 +1240,13 @@ onMounted(() => window.addEventListener('resize', sizeCellFont))
             <div class="teams">
               <div class="team tA" :class="{ active: gameState.phase === 'playing' && currentTeam === 'A' }">
                 <span class="swatch"></span>{{ teamNames.A }} <span class="num">{{ score.a }}</span>
-                <span v-if="myTeam === 'B' && !redOnline" class="offbadge" title="超过 6 秒没有心跳">离线</span>
+                <button v-if="myTeam === 'B' && !redOnline && peerKickable" class="offbadge kickbadge" title="对方离线满 3 分钟，点击移出；对方会被带回大厅" @click="kickPeer">踢出</button>
+                <span v-else-if="myTeam === 'B' && !redOnline" class="offbadge" title="超过 6 秒没有心跳">离线</span>
               </div>
               <div class="team tB" :class="{ active: gameState.phase === 'playing' && currentTeam === 'B' }">
                 <span class="swatch"></span>{{ teamNames.B }} <span class="num">{{ score.b }}</span>
-                <span v-if="myTeam === 'A' && !blueOnline" class="offbadge" title="超过 6 秒没有心跳">离线</span>
+                <button v-if="myTeam === 'A' && !blueOnline && peerKickable" class="offbadge kickbadge" title="对方离线满 3 分钟，点击移出；对方会被带回大厅" @click="kickPeer">踢出</button>
+                <span v-else-if="myTeam === 'A' && !blueOnline" class="offbadge" title="超过 6 秒没有心跳">离线</span>
               </div>
             </div>
           </div>
@@ -1275,12 +1271,18 @@ onMounted(() => window.addEventListener('resize', sizeCellFont))
           </div>
 
           <details>
-            <summary>基础字库（{{ activePool.length }} 字 · 四库并集）</summary>
+            <summary>基础字库（{{ activePool.length }} 字 · 五库并集）</summary>
             <div class="detbody">
+              <div class="poolpick" :title="gameState.phase === 'ready' ? '勾选参与抽样的字库集合（并集去重）；随房间同步双方' : '仅待开局时可调整'">
+                <button v-for="opt in POOL_OPTIONS" :key="opt.key" :class="{ on: poolSel[opt.key] }"
+                        :disabled="gameState.phase !== 'ready' || !isHost" @click="togglePool(opt.key)">{{ opt.label }}</button>
+                <button class="primary" :disabled="gameState.phase !== 'ready' || !isHost"
+                        @click="selectAllPools" title="五个字库全部参与（默认）">全选</button>
+              </div>
               <div class="poolgrid">
                 <span v-for="ch in activePool" :key="ch" :class="{ on: poolOn[ch] }">{{ ch }}</span>
               </div>
-              <p class="poolnote">勾选的字库集合取并集去重后构成基础字库；对局中不可调整，房主可点顶栏按钮切换并自动重抽。</p>
+              <p class="poolnote">勾选的字库集合取并集去重后构成基础字库；对局中不可调整，房主可在此切换并自动重抽。</p>
             </div>
           </details>
           <details>
@@ -1298,7 +1300,7 @@ onMounted(() => window.addEventListener('resize', sizeCellFont))
             <summary>规则与判定逻辑</summary>
             <div class="detbody">
               <ol class="rules">
-                <li>棋盘：从<b>基础字库</b>（默认为「全唐诗 300 + 全宋词 300 + 苏轼 300 + 辛弃疾 300」四库并集去重，可在顶栏勾选参与集合）中<b>随机抽 N×N 个不重复的字</b>铺成方阵（N 可在顶栏设 5–20）。顶栏「<b>额外字</b>」可指定其中 K 格改从<b>额外字池</b>（自动避开已选基础字库）里抽 —— 抽取<b>按唐诗与宋词合计频次加权</b>，越常见的字越容易被抽中。</li>
+                <li>棋盘：从<b>基础字库</b>（默认为「全唐诗 300 + 全宋词 300 + 宋词 300·不含唐诗字 + 苏轼 300 + 辛弃疾 300」五库并集去重，可在「基础字库」面板勾选参与集合）中<b>随机抽 N×N 个不重复的字</b>铺成方阵（N 可在顶栏设 5–20）。顶栏「<b>额外字</b>」可指定其中 K 格改从<b>额外字池</b>（自动避开已选基础字库）里抽 —— 抽取<b>按唐诗与宋词合计频次加权</b>，越常见的字越容易被抽中。</li>
                 <li>涂色：某人飞出一句后，<b>诗句中所有出现在棋盘上的字</b>，对应格子全部涂成该方颜色。</li>
                 <li>合法性：本句命中棋盘的字中，<b>至少要有 1 个格子当前未填色</b>；命中已涂色格可以抢夺。若命中格全都是已有颜色，本句无效。</li>
                 <li>胜负：本局为「<b>战至最后一刻</b>」模式——不限轮数，<b>棋盘填满</b>或点「<b>提前结算</b>」才结算，<b>己方颜色格子多者胜</b>；等同则平局。</li>
@@ -1497,6 +1499,8 @@ input[type=number]:disabled,select:disabled{background:#F2F5FA;border-color:#E1E
 
 /* ---------- 对局在线状态徽标 ---------- */
 .offbadge{display:inline-block;margin-left:6px;font-size:11px;font-weight:600;color:#B4433A;background:#FBEDEC;border:1px solid #F0C7C4;border-radius:999px;padding:1px 8px;vertical-align:1px;}
+button.offbadge{cursor:pointer;font-family:inherit;line-height:1.5;}
+button.offbadge:hover{background:#F6D9D6;}
 .banner button{margin-left:10px;padding:5px 12px;font-size:12px;}
 
 /* ---------- layout ---------- */

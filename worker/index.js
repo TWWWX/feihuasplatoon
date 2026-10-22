@@ -42,7 +42,8 @@ export default {
     }
   },
 
-  /* ================= 定时清理：每日删除 createdAt 超过 24 小时的房间 =================
+  /* ================= 定时清理：每日删除「createdAt 超 24h 且双方都不在线满 24h（或席位为空）」的房间
+     任一席位心跳仍新鲜则保留（长时间连续对局不会被误删）。
      需要两个 Secret（Firebase 控制台 → 项目设置 → 服务账号 → 生成新私钥）：
        npx wrangler secret put FIREBASE_SA_EMAIL   # client_email
        npx wrangler secret put FIREBASE_SA_KEY     # private_key（PEM 全文）
@@ -108,7 +109,7 @@ async function getAccessToken(env) {
   return j.access_token
 }
 
-/* ---- shallow 扫 rooms → 逐个看 meta.createdAt → 超 24h 删除 ---- */
+/* ---- shallow 扫 rooms → createdAt 超 24h 且双方都不在线满 24h（或席位为空）才删 ---- */
 const RTDB = 'https://feihuasplatoon-default-rtdb.asia-southeast1.firebasedatabase.app'
 async function cleanupRooms(env) {
   const token = await getAccessToken(env)
@@ -125,7 +126,19 @@ async function cleanupRooms(env) {
     try {
       const m = await fetch(`${RTDB}/rooms/${id}/meta.json?${auth}`)
       const meta = await m.json()
-      if (meta && typeof meta.createdAt === 'number' && meta.createdAt < cutoff) {
+      if (!(meta && typeof meta.createdAt === 'number' && meta.createdAt < cutoff)) continue
+      const pr = await fetch(`${RTDB}/rooms/${id}/players.json?${auth}`)
+      const players = await pr.json()
+      const ps = await fetch(`${RTDB}/rooms/${id}/presence.json?${auth}`)
+      const presence = await ps.json()
+      /* 空席视为「没人在线」；有人的席位看心跳：缺失或早于 cutoff 即离线满 24h */
+      const away24 = (seat) => {
+        const seatUid = players && players[seat] && players[seat].uid
+        if (!seatUid) return true
+        const ts = presence && presence[seat]
+        return typeof ts !== 'number' || ts < cutoff
+      }
+      if (away24('red') && away24('blue')) {
         const del = await fetch(`${RTDB}/rooms/${id}.json?${auth}`, { method: 'DELETE' })
         if (del.ok) removed++
         else console.error(`[cleanup] delete ${id} → HTTP ${del.status}`)
