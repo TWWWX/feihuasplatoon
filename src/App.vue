@@ -48,7 +48,7 @@ const redOnline = ref(true)
 const blueOnline = ref(true)
 const peerKickable = ref(false) /* 对方离线满 3 分钟：徽标变踢出按钮 */
 const gotRoomSnapshot = ref(false)
-/* 对方席位离线（超 6 秒无心跳）：显示横幅与徽标；满 3 分钟徽标变踢出按钮，也可被新成员顶替 */
+/* 对方席位离线（超 25 秒无心跳）：显示横幅与徽标；满 3 分钟徽标变踢出按钮，也可被新成员顶替 */
 const peerOffline = computed(
   () =>
     roomState.value === 'playing' &&
@@ -175,14 +175,12 @@ function cloudToLocalState(st) {
   }
 }
 
-/* ---- 轮询同步（REST 无长连接：1s 拉整房，内容有变化才写回本地） ---- */
+/* ---- 轮询同步（REST 无长连接：3s 拉整房，内容有变化才写回本地；页面隐藏时暂停） ---- */
 let pollTimer = null
 let lastRoomJson = ''
+let lastBeatAt = 0 /* 上次心跳写入时刻：15 秒一写，省 Function 调用额度 */
 
-function startPolling(code) {
-  stopPolling()
-  lastRoomJson = ''
-  pollTimer = setInterval(async () => {
+async function pollOnce(code) {
     let val = null
     try {
       val = await rtdbGet(`rooms/${code}`)
@@ -207,10 +205,13 @@ function startPolling(code) {
        必须用 PUT（RTDB REST 的 PATCH 只接受 {路径:值} 对象，裸数字会 400） */
     const seats = val.players || {}
     const mySeat = seats.red && seats.red.uid === uid.value ? 'red' : seats.blue && seats.blue.uid === uid.value ? 'blue' : null
-    if (mySeat) rtdbSet(`rooms/${code}/presence/${mySeat}`, Date.now()).catch(() => {})
-    /* 离线判定：席位为空或心跳 6 秒内更新视为在线；离线满 3 分钟可踢出/顶替 */
+    if (mySeat && Date.now() - lastBeatAt >= 15000) {
+      lastBeatAt = Date.now()
+      rtdbSet(`rooms/${code}/presence/${mySeat}`, Date.now()).catch(() => {})
+    }
+    /* 离线判定：席位为空或心跳 25 秒内更新视为在线（心跳 15s + 轮询 3s 抖动余量）；离线满 3 分钟可踢出/顶替 */
     const now = Date.now()
-    const freshTs = (t) => typeof t === 'number' && now - t < 6000
+    const freshTs = (t) => typeof t === 'number' && now - t < 25000
     redOnline.value = !seats.red || seats.red.uid === uid.value || freshTs(val.presence && val.presence.red)
     blueOnline.value = !seats.blue || seats.blue.uid === uid.value || freshTs(val.presence && val.presence.blue)
     peerKickable.value =
@@ -230,12 +231,37 @@ function startPolling(code) {
     if (json === lastRoomJson) return
     lastRoomJson = json
     applyRoomSnapshot(val)
-  }, 1000)
 }
-function stopPolling() {
+function startPollTimer(code) {
+  stopPollTimer()
+  pollTimer = setInterval(() => { pollOnce(code) }, 3000)
+}
+function stopPollTimer() {
   if (pollTimer) {
     clearInterval(pollTimer)
     pollTimer = null
+  }
+}
+function startPolling(code) {
+  stopPolling()
+  lastRoomJson = ''
+  lastBeatAt = 0 /* 进房立即写一次心跳，让对手马上看到自己在线 */
+  pollOnce(code) /* 启动即拉一次，不等首个间隔 */
+  startPollTimer(code)
+}
+function stopPolling() {
+  stopPollTimer()
+  lastRoomJson = ''
+}
+/* 页面隐藏时暂停轮询（省 Function 额度），恢复可见立即拉一次并重启定时器 */
+function onVisibilityChange() {
+  const code = roomCode.value
+  if (!code) return
+  if (document.hidden) {
+    stopPollTimer()
+  } else {
+    pollOnce(code).catch(() => {})
+    startPollTimer(code)
   }
 }
 function applyRoomSnapshot(val) {
@@ -1162,10 +1188,12 @@ onMounted(async () => {
     }
   }
   redrawBoard()
+  document.addEventListener('visibilitychange', onVisibilityChange)
 })
 onBeforeUnmount(() => {
   if (changedTimer) clearTimeout(changedTimer)
   window.removeEventListener('resize', sizeCellFont)
+  document.removeEventListener('visibilitychange', onVisibilityChange)
   stopPolling()
 })
 onMounted(() => window.addEventListener('resize', sizeCellFont))
@@ -1243,12 +1271,12 @@ onMounted(() => window.addEventListener('resize', sizeCellFont))
               <div class="team tA" :class="{ active: gameState.phase === 'playing' && currentTeam === 'A' }">
                 <span class="swatch"></span>{{ teamNames.A }} <span class="num">{{ score.a }}</span>
                 <button v-if="myTeam === 'B' && !redOnline && peerKickable" class="offbadge kickbadge" title="对方离线满 3 分钟，点击移出；对方会被带回大厅" @click="kickPeer">踢出</button>
-                <span v-else-if="myTeam === 'B' && !redOnline" class="offbadge" title="超过 6 秒没有心跳">离线</span>
+                <span v-else-if="myTeam === 'B' && !redOnline" class="offbadge" title="超过 25 秒没有心跳">离线</span>
               </div>
               <div class="team tB" :class="{ active: gameState.phase === 'playing' && currentTeam === 'B' }">
                 <span class="swatch"></span>{{ teamNames.B }} <span class="num">{{ score.b }}</span>
                 <button v-if="myTeam === 'A' && !blueOnline && peerKickable" class="offbadge kickbadge" title="对方离线满 3 分钟，点击移出；对方会被带回大厅" @click="kickPeer">踢出</button>
-                <span v-else-if="myTeam === 'A' && !blueOnline" class="offbadge" title="超过 6 秒没有心跳">离线</span>
+                <span v-else-if="myTeam === 'A' && !blueOnline" class="offbadge" title="超过 25 秒没有心跳">离线</span>
               </div>
             </div>
           </div>
@@ -1306,7 +1334,7 @@ onMounted(() => window.addEventListener('resize', sizeCellFont))
                 <li>涂色：某人飞出一句后，<b>诗句中所有出现在棋盘上的字</b>，对应格子全部涂成该方颜色。</li>
                 <li>合法性：本句命中棋盘的字中，<b>至少要有 1 个格子当前未填色</b>；命中已涂色格可以抢夺。若命中格全都是已有颜色，本句无效。</li>
                 <li>胜负：本局为「<b>战至最后一刻</b>」模式——不限轮数，<b>棋盘填满</b>或点「<b>提前结算</b>」才结算，<b>己方颜色格子多者胜</b>；等同则平局。</li>
-                <li>离线：对方 <b>6 秒</b>无心跳即在队名处显示「离线」，对战<b>不会暂停</b>，可直接继续提交；对方离线满 <b>3 分钟</b>，队名处出现「踢出」按钮（移出后对方回大厅），新成员加入时也可<b>顶替</b>其席位（双方离线时优先顶替离线更久者）；房主离线满 3 分钟，在席成员自动接管房主。双方都不在线满 24 小时的房间会被定时清理。</li>
+                <li>离线：对方 <b>25 秒</b>无心跳即在队名处显示「离线」，对战<b>不会暂停</b>，可直接继续提交；对方离线满 <b>3 分钟</b>，队名处出现「踢出」按钮（移出后对方回大厅），新成员加入时也可<b>顶替</b>其席位（双方离线时优先顶替离线更久者）；房主离线满 3 分钟，在席成员自动接管房主。双方都不在线满 24 小时的房间会被定时清理。</li>
               </ol>
             </div>
           </details>
