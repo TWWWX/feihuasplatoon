@@ -42,7 +42,6 @@ const myTeam = computed(() => {
   if (p.blue?.uid === uid.value) return 'B'
   return null
 })
-const isHost = computed(() => roomMeta.value?.hostUid === uid.value)
 /* 在线心跳：各席位成员写 presence/red | presence/blue（REST 无 onDisconnect，用时间戳判定）。
    对方离线只做「标记」，不暂停对战：对方离线时仍可正常提交（云端不依赖对方在线）。 */
 const redOnline = ref(true)
@@ -1183,22 +1182,22 @@ onMounted(() => window.addEventListener('resize', sizeCellFont))
         <span v-if="roomState === 'playing'" class="conn room">你是{{ myTeam ? teamNames[myTeam] : '观战' }}</span>
         <template v-if="roomState === 'playing'">
           <label class="chk" title="开启后，点击棋盘格子可循环切换：无主 → 赤 → 青 → 无主">
-            <input type="checkbox" v-model="fixMode" :disabled="!isHost" /> 修正模式
+            <input type="checkbox" v-model="fixMode" /> 修正模式
           </label>
           <label class="sizefield" :class="{ off: gameState.phase === 'playing' }"
                  title="棋盘 N×N（5–20，改完自动重抽棋盘）">
             <input type="number" v-model.number="sizeInput" min="5" max="20" step="1" inputmode="numeric"
-                   :disabled="gameState.phase === 'playing' || !isHost" @change="onSizeChange" />
+                   :disabled="gameState.phase === 'playing'" @change="onSizeChange" />
             <span>× <b>{{ gameState.side }}</b> 格</span>
           </label>
           <label class="sizefield" :class="{ off: gameState.phase === 'playing' }"
                  title="额外字：从额外字池（自动避开已选基础字库）按唐诗+宋词合计频次加权抽取 K 个放进棋盘（0 = 只用基础字库）">
             <input type="number" v-model.number="extraInput" min="0" step="1" inputmode="numeric"
-                   :disabled="gameState.phase === 'playing' || !isHost" @change="onExtraChange" />
+                   :disabled="gameState.phase === 'playing'" @change="onExtraChange" />
             <span>个额外字</span>
           </label>
-          <button :disabled="gameState.phase === 'playing' || !isHost" @click="onRedraw">重抽棋盘</button>
-          <button class="primary" :disabled="gameState.phase !== 'ready' || !isHost" @click="startGame">{{ startLabel }}</button>
+          <button :disabled="gameState.phase === 'playing'" @click="onRedraw">重抽棋盘</button>
+          <button class="primary" :disabled="gameState.phase !== 'ready'" @click="startGame">{{ startLabel }}</button>
           <button :disabled="!gameState.undoStack.length" @click="undo">撤销一步</button>
           <button :disabled="gameState.phase !== 'playing'" @click="onFinish">提前结算</button>
           <button @click="exitRoom">退出房间</button>
@@ -1278,14 +1277,14 @@ onMounted(() => window.addEventListener('resize', sizeCellFont))
             <div class="detbody">
               <div class="poolpick" :title="gameState.phase === 'ready' ? '勾选参与抽样的字库集合（并集去重）；随房间同步双方' : '仅待开局时可调整'">
                 <button v-for="opt in POOL_OPTIONS" :key="opt.key" :class="{ on: poolSel[opt.key] }"
-                        :disabled="gameState.phase !== 'ready' || !isHost" @click="togglePool(opt.key)">{{ opt.label }}</button>
-                <button class="primary" :disabled="gameState.phase !== 'ready' || !isHost"
+                        :disabled="gameState.phase !== 'ready'" @click="togglePool(opt.key)">{{ opt.label }}</button>
+                <button class="primary" :disabled="gameState.phase !== 'ready'"
                         @click="selectAllPools" title="七个字库全部参与（默认）">全选</button>
               </div>
               <div class="poolgrid">
                 <span v-for="ch in activePool" :key="ch" :class="{ on: poolOn[ch] }">{{ ch }}</span>
               </div>
-              <p class="poolnote">勾选的字库集合取并集去重后构成基础字库；对局中不可调整，房主可在此切换并自动重抽。</p>
+              <p class="poolnote">勾选的字库集合取并集去重后构成基础字库；对局中不可调整，开局前双方均可切换并自动重抽。</p>
             </div>
           </details>
           <details>
@@ -1421,7 +1420,7 @@ onMounted(() => window.addEventListener('resize', sizeCellFont))
         </div>
         <div class="row" style="margin-top:16px;justify-content:flex-end">
           <button @click="showResult = false">返回棋盘</button>
-          <button class="primary" :disabled="!isHost" title="仅房主可开新局；房间保留、双方无需重新加入，直接重开一盘" @click="again">再来一局</button>
+          <button class="primary" title="开新局；房间保留、双方无需重新加入，直接重开一盘（双方都可操作）" @click="again">再来一局</button>
         </div>
       </div>
     </div>
