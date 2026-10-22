@@ -48,7 +48,7 @@ const isHost = computed(() => roomMeta.value?.hostUid === uid.value)
 const redOnline = ref(true)
 const blueOnline = ref(true)
 const gotRoomSnapshot = ref(false)
-/* 对方席位离线（超 6 秒无心跳）：显示横幅与徽标；超 10 分钟由轮询自动下位/接管 */
+/* 对方席位离线（超 6 秒无心跳）：显示横幅与徽标；3 分钟可手动移出，30 分钟由轮询自动下位/接管 */
 const peerOffline = computed(
   () =>
     roomState.value === 'playing' &&
@@ -59,13 +59,13 @@ const peerOffline = computed(
 async function kickPeer() {
   if (!roomCode.value || !myTeam.value) return
   const seat = myTeam.value === 'A' ? 'blue' : 'red'
-  if (!confirm(`将「${teamNames.value[myTeam.value === 'A' ? 'B' : 'A']}」移出房间？对方会立刻回到大厅，席位空出后新人可加入（需对方离线超过 10 分钟）。`)) return
+  if (!confirm(`将「${teamNames.value[myTeam.value === 'A' ? 'B' : 'A']}」移出房间？对方会立刻回到大厅，席位空出后新人可加入（需对方离线超过 3 分钟）。`)) return
   try {
     await rtdbRemove(`rooms/${roomCode.value}/players/${seat}`)
     flashTip('对方席位已空出。', 'ok')
   } catch (e) {
     const msg = String((e && e.message) || e)
-    flashTip(/permission denied/i.test(msg) ? '移出被拒：对方离线未满 10 分钟（安全规则限制）。' : '移出失败：' + msg, 'err')
+    flashTip(/permission denied/i.test(msg) ? '移出被拒：对方离线未满 3 分钟（安全规则限制）。' : '移出失败：' + msg, 'err')
   }
 }
 /* 回合锁：只有轮到自己阵营时才能出牌（观战身份不能出牌） */
@@ -253,7 +253,7 @@ function syncState() {
   )
 }
 
-/* ---- 房间维护（轮询时由在线方执行）：无主房间接管 / 房主离线 10 分钟转移 / 对方离线 10 分钟自动下位 ---- */
+/* ---- 房间维护（轮询时由在线方执行）：无主房间接管 / 房主离线 30 分钟转移 / 对方离线 30 分钟自动下位 ---- */
 let lastMaintainAt = 0
 async function maintainRoom(val) {
   if (!val || !val.meta || !roomCode.value) return
@@ -264,29 +264,29 @@ async function maintainRoom(val) {
   const mine = uid.value
   const hostUid = val.meta.hostUid
   if (!mine || (red !== mine && blue !== mine)) return
-  const fresh10 = (t) => typeof t === 'number' && Date.now() - t < 600000
-  const redHere = !!red && (red === mine || fresh10(val.presence && val.presence.red))
-  const blueHere = !!blue && (blue === mine || fresh10(val.presence && val.presence.blue))
+  const fresh30 = (t) => typeof t === 'number' && Date.now() - t < 1800000
+  const redHere = !!red && (red === mine || fresh30(val.presence && val.presence.red))
+  const blueHere = !!blue && (blue === mine || fresh30(val.presence && val.presence.blue))
   const hostSeatGone = hostUid !== red && hostUid !== blue
   const hostSeatStale = (hostUid === red && !redHere) || (hostUid === blue && !blueHere)
   let acted = false
   try {
-    /* 房主缺席（席位转移后残留 / 房主离线超 10 分钟）→ 我作为在席成员接管 */
+    /* 房主缺席（席位转移后残留 / 房主离线超 30 分钟）→ 我作为在席成员接管 */
     if (hostUid !== mine && (hostSeatGone || hostSeatStale)) {
       await rtdbPatch(`rooms/${roomCode.value}/meta`, { hostUid: mine })
       acted = true
-      flashTip(hostSeatGone ? '房间无主，你已成为房主。' : '房主离线超过 10 分钟，你已接管房间。', 'ok')
+      flashTip(hostSeatGone ? '房间无主，你已成为房主。' : '房主离线超过 30 分钟，你已接管房间。', 'ok')
     }
-    /* 对方席位有人但心跳超 10 分钟 → 自动下位，空出席位给新人 */
+    /* 对方席位有人但心跳超 30 分钟 → 自动下位，空出席位给新人 */
     if (blue === mine && red && !redHere) {
       await rtdbRemove(`rooms/${roomCode.value}/players/red`)
       acted = true
-      flashTip('赤营离线超过 10 分钟，已自动释放红方席位。', 'warn')
+      flashTip('赤营离线超过 30 分钟，已自动释放红方席位。', 'warn')
     }
     if (red === mine && blue && !blueHere) {
       await rtdbRemove(`rooms/${roomCode.value}/players/blue`)
       acted = true
-      flashTip('青营离线超过 10 分钟，已自动释放席位。', 'warn')
+      flashTip('青营离线超过 30 分钟，已自动释放席位。', 'warn')
     }
     if (acted) lastMaintainAt = Date.now()
   } catch (e) {
@@ -479,7 +479,7 @@ async function joinRoom() {
         }
       }
       if (!seated) {
-        throw new Error('房间已满（赤青两营均有玩家）。若一方离线超过 10 分钟，席位会自动释放。')
+        throw new Error('房间已满（赤青两营均有玩家）。对方离线满 3 分钟可由在席玩家手动移出，满 30 分钟自动释放。')
       }
     }
     /* 房主重连、已在席位恢复、或占位成功，都直接进入 */
@@ -693,7 +693,7 @@ function exportGameCtx() {
 const onExportPng = () => exportShotPng(exportGameCtx(), flashTip)
 const onExportGif = () => exportShotGif(exportGameCtx(), flashTip)
 
-/* 出手前预览：输入句命中的格子刷成当前回合方的半透明色 */
+/* 出手前预览：输入句命中的格子刷成己方阵营的半透明色（对方回合也可作草稿预览） */
 const poemInput = ref('')
 const previewSet = ref(new Set())
 /* 输入锁定：仅未开局 / 已结束时锁（对局中对方回合也可打草稿，但提交按钮仍锁定） */
@@ -728,8 +728,8 @@ function colorToken(i) {
   const cell = gameState.board[i]
   if (!cell) return 'blank'
   const o = cell.owner
-  if (gameState.phase === 'playing' && myTurn.value && previewSet.value.has(cell.ch)) {
-    const t = currentTeam.value
+  if (gameState.phase === 'playing' && previewSet.value.has(cell.ch)) {
+    const t = myTeam.value
     if (o === t) return 'own' + t
     return 'pv' + t + (o || 'N')
   }
@@ -745,10 +745,10 @@ function cellClass(i) {
   const token = colorToken(i)
   const cls = ['cell']
   if (cell.owner) cls.push('own-' + cell.owner)
-  if (gameState.phase === 'playing' && myTurn.value && previewSet.value.has(cell.ch)) {
-    cls.push('pv-' + currentTeam.value)
+  if (gameState.phase === 'playing' && previewSet.value.has(cell.ch)) {
+    cls.push('pv-' + myTeam.value)
     if (!cell.owner) cls.push('pv-new')
-    else if (cell.owner !== currentTeam.value) cls.push('pv-cap')
+    else if (cell.owner !== myTeam.value) cls.push('pv-cap')
     else cls.push('pv-hold')
   }
   if (fixMode.value) cls.push('fixable')
@@ -1233,8 +1233,8 @@ onMounted(() => window.addEventListener('resize', sizeCellFont))
     <!-- ========== 游戏主界面 ========== -->
     <div v-else class="layout">
       <div v-if="peerOffline" class="banner">
-        对方已离线（超过 6 秒）—— 对战不会暂停，可直接继续提交。对方离线满 10 分钟后席位会自动释放。
-        <button @click="kickPeer" title="手动移出对方（需对方离线超过 10 分钟）；对方会被带回大厅">移出对方</button>
+        对方已离线（超过 6 秒）—— 对战不会暂停，可直接继续提交。对方离线满 3 分钟可手动移出，满 30 分钟自动释放席位。
+        <button @click="kickPeer" title="手动移出对方（需对方离线超过 3 分钟）；对方会被带回大厅">移出对方</button>
       </div>
       <!-- 左：棋盘 -->
       <div class="side">
